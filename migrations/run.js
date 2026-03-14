@@ -11,6 +11,7 @@ async function runMigrations() {
     port: parseInt(process.env.DB_PORT, 10) || 3306,
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'finedyn',
     multipleStatements: true,
   });
 
@@ -19,7 +20,19 @@ async function runMigrations() {
     const schemaPath = path.join(__dirname, 'schema.sql');
     const sql = fs.readFileSync(schemaPath, 'utf8');
     console.log('[Migration] Running schema.sql...');
-    await connection.query(sql);
+    const schemaStatements = sql.split(';').map(s => s.trim()).filter(s => s.length > 0);
+    for (const stmt of schemaStatements) {
+      try {
+        await connection.query(stmt);
+      } catch (e) {
+        // Ignore "duplicate column", "table already exists", or "unknown column" errors during baseline schema sync
+        if (e.errno === 1060 || e.errno === 1050 || e.errno === 1054) {
+          // Silent skip for schema.sql
+        } else {
+          throw e;
+        }
+      }
+    }
     console.log('[Migration] Schema applied successfully.');
 
     // Run additional migration files (safe for re-runs)

@@ -162,8 +162,8 @@ async function createRestaurant(req, res) {
     return { restaurantId, userId: userResult.insertId };
   });
 
-  sendWelcome(email, ownerName, restaurantName).catch(() => {});
-  notifySuperAdmins('info', `New Restaurant Added: ${restaurantName}`, `${restaurantName} (owner: ${ownerName}, ${email}) was added by super admin.`, result.restaurantId).catch(() => {});
+  sendWelcome(email, ownerName, restaurantName).catch(() => { });
+  notifySuperAdmins('info', `New Restaurant Added: ${restaurantName}`, `${restaurantName} (owner: ${ownerName}, ${email}) was added by super admin.`, result.restaurantId).catch(() => { });
   return success(res, { ...result, tempPassword: finalPassword }, 'Restaurant created.', HTTP_STATUS.CREATED);
 }
 
@@ -247,7 +247,7 @@ async function renewSubscription(req, res) {
     `Subscription Renewed: ${restaurantName}`,
     `Subscription renewed for ${durationMonths} month(s). Amount: ₹${amount}. Payment mode: ${paymentMode || 'cash'}.`,
     parseInt(id)
-  ).catch(() => {});
+  ).catch(() => { });
 
   // Notify the restaurant owner
   const { notifyRestaurantOwner } = require('./notification.controller');
@@ -255,7 +255,7 @@ async function renewSubscription(req, res) {
     parseInt(id), 'success',
     'Subscription Renewed',
     `Your FineDyn subscription has been renewed for ${durationMonths} month(s). Thank you!`
-  ).catch(() => {});
+  ).catch(() => { });
 
   return success(res, null, 'Subscription renewed successfully.');
 }
@@ -308,7 +308,7 @@ async function updateCurrentPlan(req, res) {
     `Plan Updated: ${restRows[0].name}`,
     `Plan changed to "${planRows[0].name}" (applied to current subscription, no renewal).`,
     parseInt(id)
-  ).catch(() => {});
+  ).catch(() => { });
 
   return success(res, null, `Plan updated to "${planRows[0].name}" on current subscription.`);
 }

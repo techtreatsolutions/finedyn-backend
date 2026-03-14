@@ -103,9 +103,9 @@ async function register(req, res) {
   });
 
   // Send welcome email (non-blocking)
-  sendWelcome(email, ownerName, restaurantName).catch(() => {});
+  sendWelcome(email, ownerName, restaurantName).catch(() => { });
   // Notify super admins about new registration
-  notifySuperAdmins('info', `New Restaurant Registered: ${restaurantName}`, `${restaurantName} (${email}) has self-registered on FineDyn. Plan: Trial (14 days).`, result.restaurantId).catch(() => {});
+  notifySuperAdmins('info', `New Restaurant Registered: ${restaurantName}`, `${restaurantName} (${email}) has self-registered on FineDyn. Plan: Trial (14 days).`, result.restaurantId).catch(() => { });
 
   return success(res, { restaurantId: result.restaurantId, userId: result.userId }, 'Restaurant registered successfully.', HTTP_STATUS.CREATED);
 }
@@ -123,7 +123,7 @@ async function forgotPassword(req, res) {
   await query('UPDATE users SET password_reset_token = ?, password_reset_expires = DATE_ADD(NOW(), INTERVAL 1 HOUR) WHERE id = ?', [token, user.id]);
 
   const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password/${token}`;
-  sendPasswordReset(user.email, resetLink).catch(() => {});
+  sendPasswordReset(user.email, resetLink).catch(() => { });
 
   return success(res, null, 'If this email exists, a reset link has been sent.');
 }
