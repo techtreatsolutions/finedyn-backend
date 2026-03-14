@@ -194,15 +194,16 @@ async function stockOut(req, res) {
       req.user.restaurantId, 'warning',
       `Low Stock Alert: ${itemRows[0].name}`,
       `${itemRows[0].name} stock is now ${newStock} (minimum: ${minStock}). Please restock soon.`
-    ).catch(() => {});
+    ).catch(() => { });
   }
 
   return success(res, null, 'Stock removed.');
 }
 
 async function getTransactions(req, res) {
-  const { itemId, type, page = 1, limit = 50 } = req.query;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const parsedPage = parseInt(page) || 1;
+  const parsedLimit = parseInt(limit) || 50;
+  const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE it.restaurant_id = ?';
   const params = [req.user.restaurantId];
@@ -217,7 +218,7 @@ async function getTransactions(req, res) {
      ${where}
      ORDER BY it.created_at DESC
      LIMIT ? OFFSET ?`,
-    [...params, parseInt(limit), offset]
+    [...params, parsedLimit, offset]
   );
   return success(res, rows);
 }
@@ -263,7 +264,7 @@ async function createTicket(req, res) {
     req.user.restaurantId, 'warning',
     `Stock Request: ${itemName}`,
     `${req.user.name || 'Staff'} raised a ${priority || 'normal'} priority request for ${quantityRequested} ${itemName}.`
-  ).catch(() => {});
+  ).catch(() => { });
 
   return success(res, { id: result.insertId }, 'Ticket raised.', HTTP_STATUS.CREATED);
 }

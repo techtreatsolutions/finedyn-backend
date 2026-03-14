@@ -78,8 +78,9 @@ async function getRestaurantStats(req, res) {
 }
 
 async function getAllRestaurants(req, res) {
-  const { page = 1, limit = 20, search, status, planId } = req.query;
-  const offset = (page - 1) * limit;
+  const parsedPage = parseInt(page) || 1;
+  const parsedLimit = parseInt(limit) || 20;
+  const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE 1=1';
   const params = [];
@@ -104,7 +105,7 @@ async function getAllRestaurants(req, res) {
      LEFT JOIN plans p ON p.id = r.plan_id
      LEFT JOIN users u ON u.restaurant_id = r.id AND u.role = 'owner'
      ${where} ORDER BY r.created_at DESC LIMIT ? OFFSET ?`,
-    [...params, parseInt(limit), offset]
+    [...params, parsedLimit, offset]
   );
 
   return paginate(res, rows, total, page, limit);
@@ -391,8 +392,9 @@ async function deletePlan(req, res) {
 }
 
 async function getSettlements(req, res) {
-  const { page = 1, limit = 20, startDate, endDate, restaurantId, search } = req.query;
-  const offset = (page - 1) * limit;
+  const parsedPage = parseInt(page) || 1;
+  const parsedLimit = parseInt(limit) || 20;
+  const offset = (parsedPage - 1) * parsedLimit;
   let where = 'WHERE 1=1';
   const params = [];
   if (startDate) { where += ' AND DATE(sp.created_at) >= ?'; params.push(startDate); }
@@ -411,7 +413,7 @@ async function getSettlements(req, res) {
      LEFT JOIN plans p ON p.id = sp.plan_id
      LEFT JOIN users u ON u.id = sp.processed_by
      ${where} ORDER BY sp.created_at DESC LIMIT ? OFFSET ?`,
-    [...params, parseInt(limit), offset]
+    [...params, parsedLimit, offset]
   );
 
   const [totalRow] = await query(`SELECT COALESCE(SUM(sp.amount), 0) AS total_amount FROM subscription_payments sp LEFT JOIN restaurants r ON r.id = sp.restaurant_id ${where}`, params);

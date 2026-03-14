@@ -9,7 +9,9 @@ const { buildOrderNumber } = require('../utils/orderHelpers');
 
 async function getReservations(req, res) {
   const { date, status, page = 1, limit = 20 } = req.query;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const parsedPage = parseInt(page) || 1;
+  const parsedLimit = parseInt(limit) || 20;
+  const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE r.restaurant_id = ?';
   const params = [req.user.restaurantId];
@@ -27,7 +29,7 @@ async function getReservations(req, res) {
      ${where}
      ORDER BY r.reservation_date ASC, r.reservation_time ASC
      LIMIT ? OFFSET ?`,
-    [...params, parseInt(limit), offset]
+    [...params, parsedLimit, offset]
   );
 
   return success(res, { reservations: rows, total: countRows[0].total, page: parseInt(page) });
@@ -107,8 +109,8 @@ async function updateReservation(req, res) {
        advance_payment_mode = COALESCE(?, advance_payment_mode)
      WHERE id = ?`,
     [customerName || null, customerPhone || null, customerEmail || null, guestCount || null,
-     reservationDate || null, reservationTime || null, tableId || null, notes || null,
-     advanceAmount !== undefined ? advanceAmount : null, advancePaymentMode || null, reservationId]
+    reservationDate || null, reservationTime || null, tableId || null, notes || null,
+    advanceAmount !== undefined ? advanceAmount : null, advancePaymentMode || null, reservationId]
   );
   return success(res, null, 'Reservation updated.');
 }
@@ -177,8 +179,8 @@ async function startOrderFromReservation(req, res) {
       `INSERT INTO orders (restaurant_id, table_id, order_number, order_type, status, waiter_id, customer_name, customer_phone, notes)
        VALUES (?, ?, ?, 'dine_in', 'pending', ?, ?, ?, ?)`,
       [restaurantId, tableId || null, orderNumber, req.user.id,
-       reservation.customer_name, reservation.customer_phone || null,
-       reservation.notes ? `Reservation #${reservationId}: ${reservation.notes}` : null]
+        reservation.customer_name, reservation.customer_phone || null,
+        reservation.notes ? `Reservation #${reservationId}: ${reservation.notes}` : null]
     );
     const orderId = insertRes.insertId;
 
@@ -202,7 +204,7 @@ async function startOrderFromReservation(req, res) {
         `INSERT INTO payments (order_id, restaurant_id, amount, amount_received, payment_mode, status, processed_by, notes)
          VALUES (?, ?, ?, ?, ?, 'paid', ?, ?)`,
         [orderId, restaurantId, reservation.advance_amount, reservation.advance_amount,
-         reservation.advance_payment_mode || 'cash', req.user.id, `Advance against reservation #${reservationId}`]
+          reservation.advance_payment_mode || 'cash', req.user.id, `Advance against reservation #${reservationId}`]
       );
 
       // Update order payment status to partial

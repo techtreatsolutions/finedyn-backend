@@ -22,9 +22,9 @@ async function saveGatewaySettings(req, res) {
   const { gatewayName, apiKey, apiSecret, webhookSecret, isActive, isTestMode } = req.body;
   if (!gatewayName || !apiKey) return error(res, 'gatewayName and apiKey are required.', HTTP_STATUS.BAD_REQUEST);
 
-  const encApiKey    = encrypt(apiKey);
+  const encApiKey = encrypt(apiKey);
   const encApiSecret = apiSecret ? encrypt(apiSecret) : null;
-  const encWebhook   = webhookSecret ? encrypt(webhookSecret) : null;
+  const encWebhook = webhookSecret ? encrypt(webhookSecret) : null;
 
   // Schema uses `gateway` column (ENUM), and `api_key_encrypted`, `api_secret_encrypted`, `webhook_secret_encrypted`
   const [existing] = await query(
@@ -195,8 +195,9 @@ async function createInstamojoPaymentLink(req, res) {
 /* ─── payment history ──────────────────────────────────────────────────────── */
 
 async function getPayments(req, res) {
-  const { page = 1, limit = 20, startDate, endDate, mode } = req.query;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const parsedPage = parseInt(page) || 1;
+  const parsedLimit = parseInt(limit) || 20;
+  const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE p.restaurant_id = ?';
   const params = [req.user.restaurantId];
@@ -209,7 +210,7 @@ async function getPayments(req, res) {
     `SELECT p.*, o.order_number FROM payments p
      LEFT JOIN orders o ON o.id = p.order_id
      ${where} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`,
-    [...params, parseInt(limit), offset]
+    [...params, parsedLimit, offset]
   );
 
   return success(res, { payments: rows, total: countRows[0].total, page: parseInt(page) });

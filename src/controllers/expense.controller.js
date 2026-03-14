@@ -38,8 +38,9 @@ async function deleteCategory(req, res) {
 /* ─── expenses ─────────────────────────────────────────────────────────────── */
 
 async function getExpenses(req, res) {
-  const { page = 1, limit = 20, categoryId, status, startDate, endDate } = req.query;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const parsedPage = parseInt(page) || 1;
+  const parsedLimit = parseInt(limit) || 20;
+  const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE e.restaurant_id = ?';
   const params = [req.user.restaurantId];
@@ -58,7 +59,7 @@ async function getExpenses(req, res) {
      ${where}
      ORDER BY e.expense_date DESC
      LIMIT ? OFFSET ?`,
-    [...params, parseInt(limit), offset]
+    [...params, parsedLimit, offset]
   );
 
   return success(res, { expenses: rows, total: countRows[0].total, page: parseInt(page) });

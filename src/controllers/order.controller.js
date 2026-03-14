@@ -11,8 +11,9 @@ const { checkFeature } = require('../utils/featureEngine');
 /* ─── list orders ──────────────────────────────────────────────────────────── */
 
 async function getOrders(req, res) {
-  const { status, tableId, floorId, search, page = 1, limit = 20, date, dateFrom, dateTo } = req.query;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const parsedPage = parseInt(page) || 1;
+  const parsedLimit = parseInt(limit) || 20;
+  const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE o.restaurant_id = ?';
   const params = [req.user.restaurantId];
@@ -49,7 +50,7 @@ async function getOrders(req, res) {
      ${where}
      ORDER BY o.created_at DESC
      LIMIT ? OFFSET ?`,
-    [...params, parseInt(limit), offset]
+    [...params, parsedLimit, offset]
   );
 
   return success(res, { orders: rows, total, page: parseInt(page), limit: parseInt(limit) });
@@ -843,9 +844,9 @@ async function getCustomerByPhone(req, res) {
 /* ─── CRM: customer list with aggregates ──────────────────────────────────── */
 
 async function getCustomers(req, res) {
-  const { search, page = 1, limit = 20, dateFrom, dateTo } = req.query;
-  const restaurantId = req.user.restaurantId;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const parsedPage = parseInt(page) || 1;
+  const parsedLimit = parseInt(limit) || 20;
+  const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE o.restaurant_id = ? AND (o.customer_phone IS NOT NULL AND o.customer_phone != "")';
   const params = [restaurantId];
@@ -880,7 +881,7 @@ async function getCustomers(req, res) {
 
   const [rows] = await query(
     `${innerQuery} ORDER BY last_visit DESC LIMIT ? OFFSET ?`,
-    [...params, ...havingParams, parseInt(limit), offset]
+    [...params, ...havingParams, parsedLimit, offset]
   );
 
   return success(res, { customers: rows, total, page: parseInt(page) });
@@ -890,9 +891,10 @@ async function getCustomers(req, res) {
 
 async function getCustomerOrders(req, res) {
   const { phone } = req.params;
-  const { page = 1, limit = 20 } = req.query;
+  const parsedPage = parseInt(page) || 1;
+  const parsedLimit = parseInt(limit) || 20;
   const restaurantId = req.user.restaurantId;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const offset = (parsedPage - 1) * parsedLimit;
 
   const [countRows] = await query(
     'SELECT COUNT(*) AS total FROM orders WHERE restaurant_id = ? AND customer_phone = ?',
@@ -909,7 +911,7 @@ async function getCustomerOrders(req, res) {
      WHERE o.restaurant_id = ? AND o.customer_phone = ?
      ORDER BY o.created_at DESC
      LIMIT ? OFFSET ?`,
-    [restaurantId, phone, parseInt(limit), offset]
+    [restaurantId, phone, parsedLimit, offset]
   );
 
   return success(res, { orders: rows, total: countRows[0].total, page: parseInt(page) });

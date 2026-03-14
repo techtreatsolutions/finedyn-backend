@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS `restaurants` (
   `subscription_end` DATETIME,
   `bill_prefix` VARCHAR(10) NOT NULL DEFAULT 'INV',
   `bill_counter` INT NOT NULL DEFAULT 0,
+  `queued_plan_id` INT,
+  `queued_plan_months` INT NOT NULL DEFAULT 1,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
@@ -105,6 +107,7 @@ CREATE TABLE IF NOT EXISTS `users` (
   `last_login` DATETIME,
   `profile_image` VARCHAR(500),
   `pin_code` VARCHAR(10) NULL,
+  `section_access` TEXT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -137,6 +140,7 @@ CREATE TABLE IF NOT EXISTS `tables` (
   `current_order_id` INT,
   `assigned_waiter_id` INT,
   `qr_code` TEXT,
+  `table_pin` VARCHAR(20),
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
@@ -347,6 +351,7 @@ CREATE TABLE IF NOT EXISTS `inventory_categories` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `restaurant_id` INT NOT NULL,
   `name` VARCHAR(100) NOT NULL,
+  `unit` VARCHAR(50) NOT NULL DEFAULT 'pcs',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -399,11 +404,16 @@ CREATE TABLE IF NOT EXISTS `stock_requirement_tickets` (
   `restaurant_id` INT NOT NULL,
   `item_name` VARCHAR(255) NOT NULL,
   `quantity_required` VARCHAR(100) NOT NULL,
-  `priority` VARCHAR(50) NOT NULL DEFAULT 'medium',
+  `priority` VARCHAR(50) NOT NULL DEFAULT 'normal',
   `raised_by` INT,
   `raised_by_role` VARCHAR(50) NOT NULL DEFAULT 'kitchen',
-  `status` VARCHAR(50) NOT NULL DEFAULT 'open',
+  `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
   `remarks` TEXT,
+  `inventory_item_id` INT,
+  `quantity_requested` DECIMAL(10,2),
+  `requested_by` INT,
+  `approved_by` INT,
+  `manager_notes` TEXT,
   `resolved_by` INT,
   `resolved_at` DATETIME,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -431,11 +441,16 @@ CREATE TABLE IF NOT EXISTS `expenses` (
   `vendor_name` VARCHAR(255),
   `amount` DECIMAL(10,2) NOT NULL,
   `due_date` DATE,
-  `status` VARCHAR(50) NOT NULL DEFAULT 'unpaid',
+  `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
   `payment_mode` VARCHAR(50),
   `payment_date` DATE,
   `attachment_url` VARCHAR(500),
   `notes` TEXT,
+  `expense_date` DATE,
+  `created_by` INT,
+  `approved_by` INT,
+  `approved_notes` TEXT,
+  `receipt_url` VARCHAR(500),
   `recorded_by` INT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
@@ -461,6 +476,9 @@ CREATE TABLE IF NOT EXISTS `employees` (
   `profile_image` VARCHAR(500),
   `emergency_contact` VARCHAR(100),
   `address` TEXT,
+  `department` VARCHAR(100),
+  `designation` VARCHAR(100),
+  `base_salary` DECIMAL(10,2) NOT NULL DEFAULT 0,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -483,6 +501,8 @@ CREATE TABLE IF NOT EXISTS `salary_records` (
   `payment_mode` VARCHAR(50),
   `payment_date` DATE,
   `notes` TEXT,
+  `basic_salary` DECIMAL(10,2),
+  `paid_by` INT,
   `created_by` INT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
@@ -594,56 +614,42 @@ VALUES
 ON DUPLICATE KEY UPDATE `updated_at` = CURRENT_TIMESTAMP;
 
 -- ============================================================
--- COLUMN ADDITIONS (safe for existing databases)
+-- 29. QR ORDERS
 -- ============================================================
-ALTER TABLE `users`
-  ADD COLUMN IF NOT EXISTS`pin_code` VARCHAR(10) NULL AFTER `profile_image`;
-
-ALTER TABLE `restaurants`
-  ADD COLUMN `queued_plan_id` INT NULL,
-  ADD COLUMN `queued_plan_months` INT NOT NULL DEFAULT 1;
+CREATE TABLE IF NOT EXISTS `qr_orders` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `restaurant_id` INT NOT NULL,
+  `table_id` INT NOT NULL,
+  `session_token` VARCHAR(255) NOT NULL,
+  `customer_name` VARCHAR(255),
+  `customer_phone` VARCHAR(20),
+  `items` JSON NOT NULL,
+  `special_instructions` TEXT,
+  `payment_preference` VARCHAR(50),
+  `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
+  `reject_reason` TEXT,
+  `linked_order_id` INT,
+  `accepted_by` INT,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- SCHEMA vs CONTROLLER MISMATCH FIXES
+-- 30. EMPLOYEE ADVANCES
 -- ============================================================
+CREATE TABLE IF NOT EXISTS `employee_advances` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `restaurant_id` INT NOT NULL,
+  `employee_id` INT NOT NULL,
+  `type` VARCHAR(50) NOT NULL DEFAULT 'advance',
+  `amount` DECIMAL(10,2) NOT NULL,
+  `remaining` DECIMAL(10,2) NOT NULL,
+  `date` DATE NOT NULL,
+  `notes` TEXT,
+  `status` VARCHAR(50) NOT NULL DEFAULT 'active',
+  `adjusted_in_salary_id` INT,
+  `created_by` INT,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-ALTER TABLE `inventory_categories`
-  ADD COLUMN `unit` VARCHAR(50) NOT NULL DEFAULT 'pcs';
-
-ALTER TABLE `stock_requirement_tickets`
-  ADD COLUMN `inventory_item_id` INT NULL,
-  ADD COLUMN `quantity_requested` DECIMAL(10,2) DEFAULT NULL,
-  ADD COLUMN `requested_by` INT NULL,
-  ADD COLUMN `approved_by` INT NULL,
-  ADD COLUMN `manager_notes` TEXT NULL;
-ALTER TABLE `stock_requirement_tickets` MODIFY COLUMN `priority` VARCHAR(50) NOT NULL DEFAULT 'normal';
-ALTER TABLE `stock_requirement_tickets` MODIFY COLUMN `status` VARCHAR(50) NOT NULL DEFAULT 'pending';
-
-ALTER TABLE `expenses`
-  ADD COLUMN `expense_date` DATE NULL,
-  ADD COLUMN `created_by` INT NULL,
-  ADD COLUMN `approved_by` INT NULL,
-  ADD COLUMN `approved_notes` TEXT NULL,
-  ADD COLUMN `receipt_url` VARCHAR(500) NULL;
-ALTER TABLE `expenses` MODIFY COLUMN `status` VARCHAR(50) NOT NULL DEFAULT 'pending';
-
-ALTER TABLE `employees`
-  ADD COLUMN `department` VARCHAR(100) NULL,
-  ADD COLUMN `designation` VARCHAR(100) NULL,
-  ADD COLUMN `base_salary` DECIMAL(10,2) NOT NULL DEFAULT 0;
-
-ALTER TABLE `attendance_records` MODIFY COLUMN `status` VARCHAR(50) NOT NULL DEFAULT 'present';
-
-ALTER TABLE `salary_records`
-  ADD COLUMN `basic_salary` DECIMAL(10,2) DEFAULT NULL,
-  ADD COLUMN `paid_by` INT NULL;
-
-ALTER TABLE `reservations`
-  ADD COLUMN `guest_count` INT NOT NULL DEFAULT 2;
-ALTER TABLE `reservations` MODIFY COLUMN `customer_phone` VARCHAR(20) NULL;
-
-ALTER TABLE `users`
-  ADD COLUMN `section_access` TEXT NULL;
-
-ALTER TABLE `bill_format_settings`
-  ADD COLUMN `enable_tax` TINYINT(1) NOT NULL DEFAULT 1;
