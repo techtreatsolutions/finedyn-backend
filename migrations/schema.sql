@@ -238,9 +238,10 @@ CREATE TABLE IF NOT EXISTS `orders` (
   `bill_generated` TINYINT(1) NOT NULL DEFAULT 0,
   `bill_number` VARCHAR(50),
   `billed_at` DATETIME,
+  `tax_enabled` TINYINT(1) NOT NULL DEFAULT 1,
   `completed_at` DATETIME,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -635,7 +636,20 @@ CREATE TABLE IF NOT EXISTS `qr_orders` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 30. EMPLOYEE ADVANCES
+-- 30. QR SESSIONS
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `qr_sessions` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `restaurant_id` INT NOT NULL,
+  `table_id` INT NOT NULL,
+  `session_token` VARCHAR(255) NOT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 31. EMPLOYEE ADVANCES
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `employee_advances` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,

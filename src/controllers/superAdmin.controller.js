@@ -78,6 +78,7 @@ async function getRestaurantStats(req, res) {
 }
 
 async function getAllRestaurants(req, res) {
+  const { page, limit, search, status, planId } = req.query;
   const parsedPage = parseInt(page) || 1;
   const parsedLimit = parseInt(limit) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
@@ -108,7 +109,7 @@ async function getAllRestaurants(req, res) {
     [...params, parsedLimit, offset]
   );
 
-  return paginate(res, rows, total, page, limit);
+  return paginate(res, rows, total, parsedPage, parsedLimit);
 }
 
 async function getRestaurantById(req, res) {
@@ -392,6 +393,7 @@ async function deletePlan(req, res) {
 }
 
 async function getSettlements(req, res) {
+  const { page, limit, startDate, endDate, restaurantId, search } = req.query;
   const parsedPage = parseInt(page) || 1;
   const parsedLimit = parseInt(limit) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
@@ -418,7 +420,7 @@ async function getSettlements(req, res) {
 
   const [totalRow] = await query(`SELECT COALESCE(SUM(sp.amount), 0) AS total_amount FROM subscription_payments sp LEFT JOIN restaurants r ON r.id = sp.restaurant_id ${where}`, params);
 
-  return paginate(res, { settlements: rows, totalAmount: parseFloat(totalRow[0].total_amount) }, countRows[0].total, page, limit, 'Settlements retrieved.');
+  return paginate(res, { settlements: rows, totalAmount: parseFloat(totalRow[0].total_amount) }, countRows[0].total, parsedPage, parsedLimit, 'Settlements retrieved.');
 }
 
 

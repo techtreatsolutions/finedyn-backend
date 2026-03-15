@@ -195,6 +195,7 @@ async function createInstamojoPaymentLink(req, res) {
 /* ─── payment history ──────────────────────────────────────────────────────── */
 
 async function getPayments(req, res) {
+  const { page, limit, startDate, endDate, mode } = req.query;
   const parsedPage = parseInt(page) || 1;
   const parsedLimit = parseInt(limit) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
@@ -213,7 +214,7 @@ async function getPayments(req, res) {
     [...params, parsedLimit, offset]
   );
 
-  return success(res, { payments: rows, total: countRows[0].total, page: parseInt(page) });
+  return success(res, { payments: rows, total: countRows[0].total, page: parsedPage });
 }
 
 module.exports = {

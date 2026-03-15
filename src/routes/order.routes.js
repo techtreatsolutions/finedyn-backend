@@ -11,12 +11,16 @@ const auth = [authenticate];
 const mgr = [authenticate, requireRole('owner', 'manager')];
 const cashier = [authenticate, requireRole('owner', 'manager', 'cashier')];
 
+// --- Specific/static routes MUST come before parameterized /:orderId routes ---
 router.get('/', ...auth, ctrl.getOrders);
 router.get('/kitchen', ...auth, requireFeature('feature_kds'), ctrl.getKitchenOrders);
+router.patch('/kitchen/items/:itemId/status', ...auth, requireFeature('feature_kds'), ctrl.updateKitchenItemStatus);
 router.get('/customers', ...auth, ctrl.getCustomers);
 router.get('/customers/:phone/history', ...auth, ctrl.getCustomerOrders);
+router.get('/customer/:phone', ...auth, ctrl.getCustomerByPhone);
 router.post('/', ...auth, ctrl.createOrder);
 
+// --- Parameterized routes ---
 router.get('/:orderId', ...auth, ctrl.getOrderById);
 router.get('/:orderId/payments', ...auth, ctrl.getOrderPayments);
 router.post('/:orderId/items', ...auth, ctrl.addOrderItems);
@@ -34,8 +38,5 @@ router.post('/:orderId/reopen', ...auth, ctrl.reopenOrder);
 router.post('/:orderId/cancel', ...auth, ctrl.cancelOrder);
 router.get('/:orderId/bill', ...auth, ctrl.generateBill);
 router.patch('/:orderId/customer', ...auth, ctrl.updateOrderCustomer);
-router.get('/customer/:phone', ...auth, ctrl.getCustomerByPhone);
-
-router.patch('/kitchen/items/:itemId/status', ...auth, requireFeature('feature_kds'), ctrl.updateKitchenItemStatus);
 
 module.exports = router;

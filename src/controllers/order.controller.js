@@ -11,6 +11,7 @@ const { checkFeature } = require('../utils/featureEngine');
 /* ─── list orders ──────────────────────────────────────────────────────────── */
 
 async function getOrders(req, res) {
+  const { page, limit, status, tableId, floorId, search, date, dateFrom, dateTo } = req.query;
   const parsedPage = parseInt(page) || 1;
   const parsedLimit = parseInt(limit) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
@@ -53,7 +54,7 @@ async function getOrders(req, res) {
     [...params, parsedLimit, offset]
   );
 
-  return success(res, { orders: rows, total, page: parseInt(page), limit: parseInt(limit) });
+  return success(res, { orders: rows, total, page: parsedPage, limit: parsedLimit });
 }
 
 /* ─── get single order ─────────────────────────────────────────────────────── */
@@ -844,6 +845,8 @@ async function getCustomerByPhone(req, res) {
 /* ─── CRM: customer list with aggregates ──────────────────────────────────── */
 
 async function getCustomers(req, res) {
+  const { page, limit, search, dateFrom, dateTo } = req.query;
+  const restaurantId = req.user.restaurantId;
   const parsedPage = parseInt(page) || 1;
   const parsedLimit = parseInt(limit) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
@@ -884,13 +887,14 @@ async function getCustomers(req, res) {
     [...params, ...havingParams, parsedLimit, offset]
   );
 
-  return success(res, { customers: rows, total, page: parseInt(page) });
+  return success(res, { customers: rows, total, page: parsedPage });
 }
 
 /* ─── CRM: customer order history ─────────────────────────────────────────── */
 
 async function getCustomerOrders(req, res) {
   const { phone } = req.params;
+  const { page, limit } = req.query;
   const parsedPage = parseInt(page) || 1;
   const parsedLimit = parseInt(limit) || 20;
   const restaurantId = req.user.restaurantId;
@@ -914,7 +918,7 @@ async function getCustomerOrders(req, res) {
     [restaurantId, phone, parsedLimit, offset]
   );
 
-  return success(res, { orders: rows, total: countRows[0].total, page: parseInt(page) });
+  return success(res, { orders: rows, total: countRows[0].total, page: parsedPage });
 }
 
 module.exports = {

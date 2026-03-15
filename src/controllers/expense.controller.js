@@ -38,6 +38,7 @@ async function deleteCategory(req, res) {
 /* ─── expenses ─────────────────────────────────────────────────────────────── */
 
 async function getExpenses(req, res) {
+  const { page, limit, categoryId, status, startDate, endDate } = req.query;
   const parsedPage = parseInt(page) || 1;
   const parsedLimit = parseInt(limit) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
@@ -62,7 +63,7 @@ async function getExpenses(req, res) {
     [...params, parsedLimit, offset]
   );
 
-  return success(res, { expenses: rows, total: countRows[0].total, page: parseInt(page) });
+  return success(res, { expenses: rows, total: countRows[0].total, page: parsedPage });
 }
 
 async function getExpenseById(req, res) {
