@@ -144,10 +144,11 @@ async function getTableMapForFloor(req, res) {
     [floorId, restaurantId]
   );
 
-  // For reserved tables, attach active reservation info
-  const reservedTableIds = rows.filter(t => t.status === 'reserved').map(t => t.id);
-  if (reservedTableIds.length > 0) {
-    const placeholders = reservedTableIds.map(() => '?').join(',');
+  // Find all active reservations for tables on this floor that are in the blocking window
+  // (1 hour before to 1.5 hours after reservation time)
+  const allTableIds = rows.map(t => t.id);
+  if (allTableIds.length > 0) {
+    const placeholders = allTableIds.map(() => '?').join(',');
     const [reservations] = await query(
       `SELECT r.id AS reservation_id, r.table_id, r.customer_name AS reservation_customer,
               r.customer_phone AS reservation_phone, r.guest_count AS reservation_guests,
@@ -156,9 +157,11 @@ async function getTableMapForFloor(req, res) {
        FROM reservations r
        WHERE r.table_id IN (${placeholders}) AND r.restaurant_id = ?
          AND r.status IN ('pending', 'confirmed')
-         AND CONCAT(r.reservation_date, ' ', r.reservation_time) >= NOW()
-       ORDER BY CONCAT(r.reservation_date, ' ', r.reservation_time) ASC`,
-      [...reservedTableIds, restaurantId]
+         AND r.reservation_date = CURDATE()
+         AND SUBTIME(r.reservation_time, '01:00:00') <= CURTIME()
+         AND ADDTIME(r.reservation_time, '01:30:00') > CURTIME()
+       ORDER BY r.reservation_time ASC`,
+      [...allTableIds, restaurantId]
     );
 
     const resMap = {};
@@ -169,6 +172,12 @@ async function getTableMapForFloor(req, res) {
     for (const row of rows) {
       if (resMap[row.id]) {
         Object.assign(row, resMap[row.id]);
+        // Auto-mark table as reserved if it's currently available and in the blocking window
+        if (row.status === 'available') {
+          row.status = 'reserved';
+          // Also update the DB so other views are consistent
+          query("UPDATE tables SET status = 'reserved' WHERE id = ? AND status = 'available'", [row.id]).catch(() => {});
+        }
       }
     }
   }

@@ -16,6 +16,7 @@ function generateAccessToken(payload) {
       restaurantId: payload.restaurantId || null,
       name: payload.name,
       type: 'access',
+      sid: payload.sessionId || null,
     },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN, issuer: 'finedyn', audience: 'finedyn-client' }

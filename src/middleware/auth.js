@@ -24,7 +24,7 @@ async function authenticate(req, res, next) {
     }
 
     const [rows] = await query(
-      `SELECT u.id, u.email, u.role, u.restaurant_id, u.name, u.is_active,
+      `SELECT u.id, u.email, u.role, u.restaurant_id, u.name, u.is_active, u.active_session_id,
               r.is_active AS restaurant_active, r.subscription_status
        FROM users u
        LEFT JOIN restaurants r ON r.id = u.restaurant_id
@@ -38,6 +38,11 @@ async function authenticate(req, res, next) {
     if (!user.is_active) return error(res, 'Your account has been deactivated.', HTTP_STATUS.FORBIDDEN);
     if (user.role !== 'super_admin' && user.restaurant_id && user.restaurant_active === 0) {
       return error(res, 'Your restaurant account is inactive.', HTTP_STATUS.FORBIDDEN);
+    }
+
+    // Single-session enforcement: reject if session ID doesn't match (logged in elsewhere)
+    if (decoded.sid && user.active_session_id && decoded.sid !== user.active_session_id) {
+      return error(res, 'Your session has expired because your account was logged in on another device.', HTTP_STATUS.UNAUTHORIZED);
     }
 
     req.user = {

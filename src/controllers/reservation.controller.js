@@ -7,6 +7,38 @@ const { checkFeature } = require('../utils/featureEngine');
 const { notifyRestaurantOwner } = require('./notification.controller');
 const { buildOrderNumber } = require('../utils/orderHelpers');
 
+/*
+  Reservation blocking window:
+    From 1 hour BEFORE reservation_time  →  to 1.5 hours AFTER reservation_time
+    e.g. reservation at 16:00 → table blocked 15:00 to 17:30
+
+  SQL helper: checks if NOW (or a given time) falls within the blocking window
+  of any active reservation on a specific table on a specific date.
+*/
+const RESERVATION_BLOCK_SQL = `
+  r.table_id = ? AND r.reservation_date = ?
+  AND r.status NOT IN ('cancelled', 'no_show', 'completed', 'seated')
+  AND SUBTIME(r.reservation_time, '01:00:00') < ?
+  AND ADDTIME(r.reservation_time, '01:30:00') > ?
+`;
+
+/**
+ * Checks if a table is blocked by a reservation at the given date/time.
+ * Returns the conflicting reservation or null.
+ */
+async function getTableReservationConflict(tableId, date, time, excludeReservationId) {
+  let sql = `SELECT id, reservation_time, customer_name FROM reservations WHERE restaurant_id = (SELECT restaurant_id FROM tables WHERE id = ? LIMIT 1) AND ${RESERVATION_BLOCK_SQL}`;
+  const params = [tableId, tableId, date, time, time];
+  if (excludeReservationId) {
+    sql += ' AND id != ?';
+    params.push(excludeReservationId);
+  }
+  sql += ' LIMIT 1';
+  const [rows] = await query(sql, params);
+  return rows && rows.length > 0 ? rows[0] : null;
+}
+
+
 async function getReservations(req, res) {
   const { date, status, page = 1, limit = 20 } = req.query;
   const parsedPage = parseInt(page, 10) || 1;
@@ -59,14 +91,21 @@ async function createReservation(req, res) {
   }
 
   // Check for table conflicts if tableId provided
+  // Blocking window: 1h before to 1.5h after the NEW reservation time
+  // This means no overlap if another reservation's blocking window intersects
   if (tableId) {
     const [conflicts] = await query(
-      `SELECT id FROM reservations
-       WHERE table_id = ? AND reservation_date = ? AND status NOT IN ('cancelled', 'no_show', 'completed')
-         AND ABS(TIMEDIFF(reservation_time, ?) / 10000) < 2`,
-      [tableId, reservationDate, reservationTime]
+      `SELECT id, reservation_time, customer_name FROM reservations
+       WHERE table_id = ? AND reservation_date = ? AND status NOT IN ('cancelled', 'no_show', 'completed', 'seated')
+         AND SUBTIME(reservation_time, '01:00:00') < ADDTIME(?, '01:30:00')
+         AND ADDTIME(reservation_time, '01:30:00') > SUBTIME(?, '01:00:00')`,
+      [tableId, reservationDate, reservationTime, reservationTime]
     );
-    if (conflicts && conflicts.length > 0) return error(res, 'Table is already reserved at that time.', HTTP_STATUS.CONFLICT);
+    if (conflicts && conflicts.length > 0) {
+      const c = conflicts[0];
+      const timeStr = c.reservation_time?.toString().slice(0, 5);
+      return error(res, `Table is already reserved at ${timeStr} for ${c.customer_name}. The table is blocked from 1 hour before to 1.5 hours after that reservation.`, HTTP_STATUS.CONFLICT);
+    }
   }
 
   const [result] = await query(
@@ -79,7 +118,7 @@ async function createReservation(req, res) {
     ]
   );
 
-  // Table is NOT marked reserved immediately — it will be auto-marked 2 hours before reservation time
+  // Table is NOT marked reserved immediately — it will be auto-marked 1 hour before reservation time
   // via the checkUpcomingReservations polling endpoint
 
   return success(res, { id: result.insertId }, 'Reservation created.', HTTP_STATUS.CREATED);
@@ -94,6 +133,18 @@ async function updateReservation(req, res) {
     [reservationId, req.user.restaurantId]
   );
   if (!rows || rows.length === 0) return error(res, 'Reservation not found.', HTTP_STATUS.NOT_FOUND);
+
+  // Check conflicts if table or time changed
+  const effectiveTable = tableId || rows[0].table_id;
+  const effectiveDate = reservationDate || rows[0].reservation_date;
+  const effectiveTime = reservationTime || rows[0].reservation_time;
+  if (effectiveTable && (tableId || reservationDate || reservationTime)) {
+    const conflict = await getTableReservationConflict(effectiveTable, effectiveDate, effectiveTime, reservationId);
+    if (conflict) {
+      const timeStr = conflict.reservation_time?.toString().slice(0, 5);
+      return error(res, `Table is already reserved at ${timeStr} for ${conflict.customer_name}.`, HTTP_STATUS.CONFLICT);
+    }
+  }
 
   await query(
     `UPDATE reservations SET
@@ -172,13 +223,20 @@ async function startOrderFromReservation(req, res) {
     if (tableRows[0].status === 'occupied') return error(res, 'Table is already occupied by another order.', HTTP_STATUS.CONFLICT);
   }
 
+  // Get floor_id from table
+  let floorId = null;
+  if (tableId) {
+    const [tblInfo] = await query('SELECT floor_id FROM tables WHERE id = ? LIMIT 1', [tableId]);
+    if (tblInfo && tblInfo.length > 0) floorId = tblInfo[0].floor_id || null;
+  }
+
   const orderNumber = buildOrderNumber();
   const result = await transaction(async (conn) => {
     // 1. Create order with customer details from reservation
     const [insertRes] = await conn.execute(
-      `INSERT INTO orders (restaurant_id, table_id, order_number, order_type, status, waiter_id, customer_name, customer_phone, notes)
-       VALUES (?, ?, ?, 'dine_in', 'pending', ?, ?, ?, ?)`,
-      [restaurantId, tableId || null, orderNumber, req.user.id,
+      `INSERT INTO orders (restaurant_id, table_id, floor_id, order_number, order_type, status, waiter_id, customer_name, customer_phone, notes)
+       VALUES (?, ?, ?, ?, 'dine_in', 'pending', ?, ?, ?, ?)`,
+      [restaurantId, tableId || null, floorId, orderNumber, req.user.id,
         reservation.customer_name, reservation.customer_phone || null,
         reservation.notes ? `Reservation #${reservationId}: ${reservation.notes}` : null]
     );
@@ -250,9 +308,13 @@ async function getAvailableTables(req, res) {
   );
 
   // If date/time provided, check for reservation conflicts
+  // Blocking window: table blocked from 1h before to 1.5h after each reservation
   if (date && time) {
-    let conflictWhere = "WHERE r.table_id IS NOT NULL AND r.reservation_date = ? AND r.status NOT IN ('cancelled', 'no_show', 'completed') AND r.restaurant_id = ? AND ABS(TIMEDIFF(r.reservation_time, ?) / 10000) < 2";
-    const conflictParams = [date, restaurantId, time];
+    let conflictWhere = `WHERE r.table_id IS NOT NULL AND r.reservation_date = ?
+       AND r.status NOT IN ('cancelled', 'no_show', 'completed', 'seated') AND r.restaurant_id = ?
+       AND SUBTIME(r.reservation_time, '01:00:00') < ADDTIME(?, '01:30:00')
+       AND ADDTIME(r.reservation_time, '01:30:00') > SUBTIME(?, '01:00:00')`;
+    const conflictParams = [date, restaurantId, time, time];
     if (excludeReservationId) {
       conflictWhere += ' AND r.id != ?';
       conflictParams.push(excludeReservationId);
@@ -285,7 +347,8 @@ async function getAvailableTables(req, res) {
 async function checkUpcomingReservations(req, res) {
   const restaurantId = req.user.restaurantId;
 
-  // 1. Auto-mark tables as "reserved" for reservations within the next 2 hours
+  // 1. Auto-mark tables as "reserved" when current time is within 1 hour before reservation time
+  //    i.e. reservation at 16:00 → table marked reserved at 15:00
   const [nearbyReservations] = await query(
     `SELECT r.id, r.table_id, r.customer_name, r.reservation_time, r.guest_count, t.table_number, t.status AS table_status, f.name AS floor_name
      FROM reservations r
@@ -294,7 +357,8 @@ async function checkUpcomingReservations(req, res) {
      WHERE r.restaurant_id = ?
        AND r.table_id IS NOT NULL
        AND r.status IN ('pending', 'confirmed')
-       AND CONCAT(r.reservation_date, ' ', r.reservation_time) BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 2 HOUR)`,
+       AND CONCAT(r.reservation_date, ' ', SUBTIME(r.reservation_time, '01:00:00')) <= NOW()
+       AND CONCAT(r.reservation_date, ' ', ADDTIME(r.reservation_time, '01:30:00')) > NOW()`,
     [restaurantId]
   );
 
@@ -359,5 +423,5 @@ async function deleteReservation(req, res) {
 module.exports = {
   getReservations, getReservationById, createReservation, updateReservation,
   updateReservationStatus, deleteReservation, startOrderFromReservation,
-  getAvailableTables, checkUpcomingReservations,
+  getAvailableTables, checkUpcomingReservations, getTableReservationConflict,
 };

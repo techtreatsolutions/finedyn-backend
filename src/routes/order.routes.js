@@ -13,8 +13,9 @@ const cashier = [authenticate, requireRole('owner', 'manager', 'cashier')];
 
 // --- Specific/static routes MUST come before parameterized /:orderId routes ---
 router.get('/', ...auth, ctrl.getOrders);
-router.get('/kitchen', ...auth, requireFeature('feature_kds'), ctrl.getKitchenOrders);
-router.patch('/kitchen/items/:itemId/status', ...auth, requireFeature('feature_kds'), ctrl.updateKitchenItemStatus);
+const kds = [authenticate, requireRole('owner', 'manager', 'cashier', 'kitchen_staff'), requireFeature('feature_kds')];
+router.get('/kitchen', ...kds, ctrl.getKitchenOrders);
+router.patch('/kitchen/items/:itemId/status', ...kds, ctrl.updateKitchenItemStatus);
 router.get('/customers', ...auth, ctrl.getCustomers);
 router.get('/customers/:phone/history', ...auth, ctrl.getCustomerOrders);
 router.get('/customer/:phone', ...auth, ctrl.getCustomerByPhone);

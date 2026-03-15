@@ -23,9 +23,9 @@ async function getOrders(req, res) {
   if (tableId) { where += ' AND o.table_id = ?'; params.push(tableId); }
   if (floorId) { where += ' AND t.floor_id = ?'; params.push(floorId); }
   if (search) {
-    where += ' AND (o.customer_name LIKE ? OR o.customer_phone LIKE ? OR o.order_number LIKE ?)';
+    where += ' AND (o.customer_name LIKE ? OR o.customer_phone LIKE ? OR o.order_number LIKE ? OR o.bill_number LIKE ?)';
     const s = `%${search}%`;
-    params.push(s, s, s);
+    params.push(s, s, s, s);
   }
   if (date) {
     where += ' AND DATE(o.created_at) = ?'; params.push(date);
@@ -132,7 +132,28 @@ async function createOrder(req, res) {
     );
     if (!tableRows || tableRows.length === 0) return error(res, 'Table not found.', HTTP_STATUS.NOT_FOUND);
     if (tableRows[0].status === 'occupied') return error(res, 'Table is already occupied.', HTTP_STATUS.CONFLICT);
+
+    // Block if table has an active reservation in the current time window
+    if (tableRows[0].status === 'reserved') {
+      return error(res, 'Table is reserved for an upcoming reservation. Use "Start Order" from the reservation to seat guests.', HTTP_STATUS.CONFLICT);
+    }
+    const { getTableReservationConflict } = require('./reservation.controller');
+    const today = new Date().toISOString().split('T')[0];
+    const nowTime = new Date().toTimeString().split(' ')[0];
+    const conflict = await getTableReservationConflict(tableId, today, nowTime);
+    if (conflict) {
+      const timeStr = conflict.reservation_time?.toString().slice(0, 5);
+      return error(res, `Table is blocked for a reservation at ${timeStr} (${conflict.customer_name}). The table is reserved from 1 hour before to 1.5 hours after the reservation time.`, HTTP_STATUS.CONFLICT);
+    }
+
     assignedWaiterId = tableRows[0].assigned_waiter_id || null;
+  }
+
+  // Get floor_id from table
+  let floorId = null;
+  if (tableId) {
+    const [tblInfo] = await query('SELECT floor_id FROM tables WHERE id = ? LIMIT 1', [tableId]);
+    if (tblInfo && tblInfo.length > 0) floorId = tblInfo[0].floor_id || null;
   }
 
   // Use table's assigned waiter if available, otherwise fall back to current user
@@ -153,9 +174,9 @@ async function createOrder(req, res) {
 
   const result = await transaction(async (conn) => {
     const [insertRes] = await conn.execute(
-      `INSERT INTO orders (restaurant_id, table_id, order_number, order_type, status, waiter_id, notes, customer_name, customer_phone, delivery_address)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [restaurantId, tableId || null, orderNumber, effectiveOrderType, initialStatus, waiterId, notes || null, customerName || null, customerPhone || null, effectiveOrderType === 'delivery' ? (deliveryAddress || null) : null]
+      `INSERT INTO orders (restaurant_id, table_id, floor_id, order_number, order_type, status, waiter_id, notes, customer_name, customer_phone, delivery_address)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [restaurantId, tableId || null, floorId, orderNumber, effectiveOrderType, initialStatus, waiterId, notes || null, customerName || null, customerPhone || null, effectiveOrderType === 'delivery' ? (deliveryAddress || null) : null]
     );
     const orderId = insertRes.insertId;
 
@@ -488,9 +509,29 @@ async function addOrderPayment(req, res) {
       paymentModeField = modesRows[0].payment_mode;
     }
 
+    // Generate bill number when fully paid
+    let billNumber = order.bill_number;
+    if (paymentStatus === 'paid' && !billNumber) {
+      const [restRows] = await conn.execute(
+        'SELECT bill_prefix, bill_counter FROM restaurants WHERE id = ? FOR UPDATE',
+        [order.restaurant_id]
+      );
+      const prefix = (restRows[0]?.bill_prefix || 'INV').toUpperCase();
+      const newCounter = (restRows[0]?.bill_counter || 0) + 1;
+      billNumber = `${prefix}-${String(newCounter).padStart(5, '0')}`;
+      await conn.execute(
+        'UPDATE restaurants SET bill_counter = ? WHERE id = ?',
+        [newCounter, order.restaurant_id]
+      );
+    }
+
     await conn.execute(
-      "UPDATE orders SET status = ?, payment_status = ?, payment_mode = ?, cashier_id = ?, completed_at = CASE WHEN ? = 'paid' THEN NOW() ELSE completed_at END WHERE id = ?",
-      [orderStatus, paymentStatus, paymentModeField, req.user.id, paymentStatus, orderId]
+      `UPDATE orders SET status = ?, payment_status = ?, payment_mode = ?, cashier_id = ?,
+       completed_at = CASE WHEN ? = 'paid' THEN NOW() ELSE completed_at END,
+       bill_number = COALESCE(bill_number, ?), bill_generated = CASE WHEN ? = 'paid' THEN 1 ELSE bill_generated END,
+       billed_at = CASE WHEN ? = 'paid' AND billed_at IS NULL THEN NOW() ELSE billed_at END
+       WHERE id = ?`,
+      [orderStatus, paymentStatus, paymentModeField, req.user.id, paymentStatus, billNumber, paymentStatus, paymentStatus, orderId]
     );
 
     // 4. Free table if fully paid -> move to cleaning, reset PIN, deactivate sessions
@@ -723,6 +764,22 @@ async function generateBill(req, res) {
   const status = initialRows[0]?.status;
   if (status && !['completed', 'cancelled'].includes(status)) {
     await recalcOrder(orderId);
+  }
+
+  // Assign a bill number if not yet assigned
+  const [preCheck] = await query('SELECT bill_number FROM orders WHERE id = ? AND restaurant_id = ? LIMIT 1', [orderId, req.user.restaurantId]);
+  if (preCheck && preCheck.length > 0 && !preCheck[0].bill_number) {
+    await transaction(async (conn) => {
+      const [restRows] = await conn.execute(
+        'SELECT bill_prefix, bill_counter FROM restaurants WHERE id = ? FOR UPDATE',
+        [req.user.restaurantId]
+      );
+      const prefix = (restRows[0]?.bill_prefix || 'INV').toUpperCase();
+      const newCounter = (restRows[0]?.bill_counter || 0) + 1;
+      const billNum = `${prefix}-${String(newCounter).padStart(5, '0')}`;
+      await conn.execute('UPDATE restaurants SET bill_counter = ? WHERE id = ?', [newCounter, req.user.restaurantId]);
+      await conn.execute('UPDATE orders SET bill_number = ?, bill_generated = 1, billed_at = NOW() WHERE id = ?', [billNum, orderId]);
+    });
   }
 
   const [rows] = await query(

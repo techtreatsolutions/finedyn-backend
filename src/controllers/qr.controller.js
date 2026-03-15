@@ -36,8 +36,15 @@ async function getTableInfo(req, res) {
     );
     if (!tRows || tRows.length === 0) return error(res, 'Table not found.', HTTP_STATUS.NOT_FOUND);
 
+    // Fetch tax setting from bill format
+    const [bfRows] = await query(
+      'SELECT enable_tax FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1',
+      [restaurant.id]
+    );
+    const enableTax = bfRows && bfRows.length > 0 ? bfRows[0].enable_tax !== 0 : true;
+
     return success(res, {
-      restaurant: { id: restaurant.id, name: restaurant.name, logoUrl: restaurant.logo_url, currency: restaurant.currency },
+      restaurant: { id: restaurant.id, name: restaurant.name, logoUrl: restaurant.logo_url, currency: restaurant.currency, enableTax },
       table: { id: tRows[0].id, tableNumber: tRows[0].table_number, capacity: tRows[0].capacity },
     });
   } catch (err) {
@@ -97,6 +104,13 @@ async function verifyTablePin(req, res) {
       );
     }
 
+    // Check restaurant-level tax setting
+    const [bfRows] = await query(
+      'SELECT enable_tax FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1',
+      [restaurant.id]
+    );
+    const restaurantTaxEnabled = bfRows && bfRows.length > 0 ? bfRows[0].enable_tax !== 0 : true;
+
     // Get current order items if table is occupied
     let currentOrder = null;
     if (table.current_order_id) {
@@ -114,7 +128,7 @@ async function verifyTablePin(req, res) {
           [table.current_order_id]
         );
         let taxBreakdown = [];
-        if (oRows[0].tax_enabled) {
+        if (restaurantTaxEnabled && oRows[0].tax_enabled) {
           const totalTax = oItems.reduce((s, i) => s + parseFloat(i.tax_amount || 0), 0);
           if (totalTax > 0) {
             const half = parseFloat((totalTax / 2).toFixed(2));
@@ -177,6 +191,13 @@ async function validateSession(req, res) {
     if (!tRows || tRows.length === 0) return error(res, 'Table not found.', HTTP_STATUS.NOT_FOUND);
     const table = tRows[0];
 
+    // Check restaurant-level tax setting
+    const [bfRowsV] = await query(
+      'SELECT enable_tax FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1',
+      [restaurant.id]
+    );
+    const restaurantTaxEnabled = bfRowsV && bfRowsV.length > 0 ? bfRowsV[0].enable_tax !== 0 : true;
+
     // Get current order items if table is occupied
     let currentOrder = null;
     if (table.current_order_id) {
@@ -194,7 +215,7 @@ async function validateSession(req, res) {
           [table.current_order_id]
         );
         let taxBreakdown = [];
-        if (oRows[0].tax_enabled) {
+        if (restaurantTaxEnabled && oRows[0].tax_enabled) {
           const totalTax = oItems.reduce((s, i) => s + parseFloat(i.tax_amount || 0), 0);
           if (totalTax > 0) {
             const half = parseFloat((totalTax / 2).toFixed(2));
@@ -436,12 +457,19 @@ async function acceptQROrder(req, res) {
       let orderId = table?.current_order_id;
 
       if (!orderId) {
-        // Create a new order for this table
+        // Block if table is reserved
+        if (table?.status === 'reserved') {
+          throw { statusCode: 409, message: 'This table is reserved for an upcoming reservation. Please check with the staff.' };
+        }
+
+        // Create a new order for this table (include floor_id from table)
+        const [tblFloor] = await conn.execute('SELECT floor_id FROM tables WHERE id = ? LIMIT 1', [qrOrder.table_id]);
+        const qrFloorId = tblFloor[0]?.floor_id || null;
         const orderNumber = buildOrderNumber();
         const [insertRes] = await conn.execute(
-          `INSERT INTO orders (restaurant_id, table_id, order_number, order_type, status, customer_name, customer_phone, notes)
-           VALUES (?, ?, ?, 'dine_in', 'pending', ?, ?, ?)`,
-          [restaurantId, qrOrder.table_id, orderNumber, qrOrder.customer_name || null, qrOrder.customer_phone || null,
+          `INSERT INTO orders (restaurant_id, table_id, floor_id, order_number, order_type, status, customer_name, customer_phone, notes)
+           VALUES (?, ?, ?, ?, 'dine_in', 'pending', ?, ?, ?)`,
+          [restaurantId, qrOrder.table_id, qrFloorId, orderNumber, qrOrder.customer_name || null, qrOrder.customer_phone || null,
             qrOrder.special_instructions || null]
         );
         orderId = insertRes.insertId;

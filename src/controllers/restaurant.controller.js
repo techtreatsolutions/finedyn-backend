@@ -118,8 +118,8 @@ async function createUser(req, res) {
   const { name, email, phone, role, password, pinCode } = req.body;
   if (!name || !email || !role) return error(res, 'name, email and role are required.', HTTP_STATUS.BAD_REQUEST);
 
-  const allowedRoles = [ROLES.MANAGER, ROLES.CASHIER, ROLES.WAITER];
-  if (!allowedRoles.includes(role)) return error(res, 'Invalid role. Allowed: manager, cashier, waiter.', HTTP_STATUS.BAD_REQUEST);
+  const allowedRoles = [ROLES.MANAGER, ROLES.CASHIER, ROLES.WAITER, ROLES.KITCHEN_STAFF];
+  if (!allowedRoles.includes(role)) return error(res, 'Invalid role. Allowed: manager, cashier, waiter, kitchen_staff.', HTTP_STATUS.BAD_REQUEST);
 
   const [existing] = await query('SELECT id FROM users WHERE email = ? LIMIT 1', [email.trim()]);
   if (existing && existing.length > 0) return error(res, 'Email already in use.', HTTP_STATUS.CONFLICT);
@@ -136,12 +136,18 @@ async function createUser(req, res) {
 
 async function updateUser(req, res) {
   const { userId } = req.params;
-  const { name, phone, isActive, pinCode, sectionAccess } = req.body;
+  const { name, email, phone, role, isActive, pinCode, sectionAccess } = req.body;
 
   const sets = [];
   const vals = [];
   if (name !== undefined) { sets.push('name = ?'); vals.push(name.trim()); }
+  if (email !== undefined) { sets.push('email = ?'); vals.push(email.trim()); }
   if (phone !== undefined) { sets.push('phone = ?'); vals.push(phone || null); }
+  if (role !== undefined) {
+    const allowedRoles = [ROLES.MANAGER, ROLES.CASHIER, ROLES.WAITER, ROLES.KITCHEN_STAFF];
+    if (!allowedRoles.includes(role)) return error(res, 'Invalid role.', HTTP_STATUS.BAD_REQUEST);
+    sets.push('role = ?'); vals.push(role);
+  }
   if (isActive !== undefined) { sets.push('is_active = ?'); vals.push(isActive ? 1 : 0); }
   if (pinCode !== undefined) { sets.push('pin_code = ?'); vals.push(pinCode ? String(pinCode).trim() : null); }
   if (sectionAccess !== undefined) { sets.push('section_access = ?'); vals.push(sectionAccess ? JSON.stringify(sectionAccess) : null); }

@@ -108,8 +108,9 @@ CREATE TABLE IF NOT EXISTS `users` (
   `profile_image` VARCHAR(500),
   `pin_code` VARCHAR(10) NULL,
   `section_access` TEXT,
+  `active_session_id` VARCHAR(64) NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -258,6 +259,7 @@ CREATE TABLE IF NOT EXISTS `order_items` (
   `quantity` INT NOT NULL DEFAULT 1,
   `tax_rate` DECIMAL(5,2) NOT NULL DEFAULT 0,
   `tax_amount` DECIMAL(10,2) NOT NULL DEFAULT 0,
+  `discount_amount` DECIMAL(10,2) NOT NULL DEFAULT 0,
   `total_price` DECIMAL(10,2) NOT NULL DEFAULT 0,
   `notes` TEXT,
   `addon_details` JSON DEFAULT NULL,
@@ -296,6 +298,7 @@ CREATE TABLE IF NOT EXISTS `payments` (
   `gateway_payment_id` VARCHAR(255),
   `gateway_signature` VARCHAR(500),
   `amount` DECIMAL(10,2) NOT NULL,
+  `amount_received` DECIMAL(10,2),
   `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
   `processed_by` INT,
   `notes` TEXT,
@@ -497,6 +500,8 @@ CREATE TABLE IF NOT EXISTS `salary_records` (
   `advances` DECIMAL(10,2) NOT NULL DEFAULT 0,
   `deductions` DECIMAL(10,2) NOT NULL DEFAULT 0,
   `bonuses` DECIMAL(10,2) NOT NULL DEFAULT 0,
+  `adjusted_advances` DECIMAL(10,2) NOT NULL DEFAULT 0,
+  `adjusted_outstanding` DECIMAL(10,2) NOT NULL DEFAULT 0,
   `net_salary` DECIMAL(10,2) NOT NULL,
   `payment_status` VARCHAR(50) NOT NULL DEFAULT 'pending',
   `payment_mode` VARCHAR(50),

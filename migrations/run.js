@@ -36,7 +36,7 @@ async function runMigrations() {
     console.log('[Migration] Schema applied successfully.');
 
     // Run additional migration files (safe for re-runs)
-    const extraMigrations = ['add_addons.sql', 'add_bill_images.sql', 'add_availability_times.sql', 'add_qr_ordering.sql', 'add_qr_device_id.sql', 'add_table_pin.sql', 'fix_qr_code_column.sql', 'add_reservation_fields.sql', 'add_employee_advances.sql', 'split_online_ordering_features.sql', 'add_delivery_orders.sql', 'add_printer_sizes.sql'];
+    const extraMigrations = ['add_addons.sql', 'add_bill_images.sql', 'add_availability_times.sql', 'add_qr_ordering.sql', 'add_qr_device_id.sql', 'add_table_pin.sql', 'fix_qr_code_column.sql', 'add_reservation_fields.sql', 'add_employee_advances.sql', 'split_online_ordering_features.sql', 'add_delivery_orders.sql', 'add_printer_sizes.sql', 'alter_add_missing.sql'];
     for (const file of extraMigrations) {
       const filePath = path.join(__dirname, file);
       if (fs.existsSync(filePath)) {

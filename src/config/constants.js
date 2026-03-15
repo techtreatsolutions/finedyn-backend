@@ -6,6 +6,7 @@ const ROLES = Object.freeze({
   MANAGER: 'manager',
   CASHIER: 'cashier',
   WAITER: 'waiter',
+  KITCHEN_STAFF: 'kitchen_staff',
 });
 
 const ORDER_STATUS = Object.freeze({

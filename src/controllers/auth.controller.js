@@ -5,6 +5,7 @@ const { query, transaction } = require('../config/database');
 const { generateAccessToken, generatePasswordResetToken, verifyPasswordResetToken } = require('../utils/jwt');
 const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS, ROLES } = require('../config/constants');
+const crypto = require('crypto');
 const { sendPasswordReset, sendWelcome } = require('../utils/email');
 const { notifySuperAdmins } = require('./notification.controller');
 
@@ -29,12 +30,14 @@ async function login(req, res) {
   const passwordMatch = await bcrypt.compare(password, user.password_hash);
   if (!passwordMatch) return error(res, 'Invalid credentials.', HTTP_STATUS.UNAUTHORIZED);
 
-  // Update last login
-  await query('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
+  // Generate unique session ID and store it (invalidates any previous session)
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  await query('UPDATE users SET last_login = NOW(), active_session_id = ? WHERE id = ?', [sessionId, user.id]);
 
   const token = generateAccessToken({
     id: user.id, email: user.email, role: user.role,
     restaurantId: user.restaurant_id, name: user.name,
+    sessionId,
   });
 
   let sectionAccess = null;
@@ -211,11 +214,14 @@ async function pinLogin(req, res) {
   if (!user.pin_code) return error(res, 'PIN login not configured for this account. Please ask your administrator to set a PIN.', HTTP_STATUS.UNAUTHORIZED);
   if (user.pin_code !== String(pin)) return error(res, 'Invalid PIN.', HTTP_STATUS.UNAUTHORIZED);
 
-  await query('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
+  // Generate unique session ID and store it (invalidates any previous session)
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  await query('UPDATE users SET last_login = NOW(), active_session_id = ? WHERE id = ?', [sessionId, user.id]);
 
   const token = generateAccessToken({
     id: user.id, email: user.email, role: user.role,
     restaurantId: user.restaurant_id, name: user.name,
+    sessionId,
   });
 
   let pinSectionAccess = null;
@@ -238,6 +244,10 @@ async function pinLogin(req, res) {
 }
 
 async function logout(req, res) {
+  // Clear active session so the token can't be reused
+  if (req.user?.id) {
+    await query('UPDATE users SET active_session_id = NULL WHERE id = ?', [req.user.id]).catch(() => {});
+  }
   return success(res, null, 'Logged out successfully.');
 }
 

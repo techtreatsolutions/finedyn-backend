@@ -101,18 +101,28 @@ async function getNotifications(req, res) {
   // Auto-generate expiry alerts lazily
   await autoGenerateExpiryAlerts(userId, role, restaurantId);
 
+  // Super admins see all their notifications; restaurant staff only see notifications for their restaurant (or with no restaurant)
+  let whereClause, queryParams;
+  if (role === 'super_admin') {
+    whereClause = 'WHERE n.user_id = ?';
+    queryParams = [userId];
+  } else {
+    whereClause = 'WHERE n.user_id = ? AND (n.restaurant_id = ? OR n.restaurant_id IS NULL)';
+    queryParams = [userId, restaurantId];
+  }
+
   const [notifications] = await query(
     `SELECT n.*, r.name AS restaurant_name
      FROM notifications n
      LEFT JOIN restaurants r ON r.id = n.restaurant_id
-     WHERE n.user_id = ?
+     ${whereClause}
      ORDER BY n.created_at DESC LIMIT 30`,
-    [userId]
+    queryParams
   );
 
   const [countRow] = await query(
-    'SELECT COUNT(*) AS unreadCount FROM notifications WHERE user_id = ? AND is_read = 0',
-    [userId]
+    `SELECT COUNT(*) AS unreadCount FROM notifications n ${whereClause} AND n.is_read = 0`,
+    queryParams
   );
 
   return success(res, {
