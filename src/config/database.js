@@ -47,7 +47,11 @@ function getPool() {
 async function query(sql, params = []) {
   const db = getPool();
   try {
-    const [rows, fields] = await db.execute(sql, params);
+    // Use pool.query() instead of pool.execute() —
+    // execute() uses prepared statements which are strict about parameter types
+    // (e.g. LIMIT ? / OFFSET ? fail if params are strings instead of integers).
+    // query() uses standard escaping and handles type coercion properly.
+    const [rows, fields] = await db.query(sql, params);
     return [rows, fields];
   } catch (err) {
     console.error('[DB] Query error:', err.message);

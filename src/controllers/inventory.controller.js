@@ -202,8 +202,8 @@ async function stockOut(req, res) {
 
 async function getTransactions(req, res) {
   const { page, limit, itemId, type } = req.query;
-  const parsedPage = parseInt(page) || 1;
-  const parsedLimit = parseInt(limit) || 50;
+  const parsedPage = parseInt(page, 10) || 1;
+  const parsedLimit = parseInt(limit, 10) || 50;
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE it.restaurant_id = ?';

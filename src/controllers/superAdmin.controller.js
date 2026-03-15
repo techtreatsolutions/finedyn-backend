@@ -79,8 +79,8 @@ async function getRestaurantStats(req, res) {
 
 async function getAllRestaurants(req, res) {
   const { page, limit, search, status, planId } = req.query;
-  const parsedPage = parseInt(page) || 1;
-  const parsedLimit = parseInt(limit) || 20;
+  const parsedPage = parseInt(page, 10) || 1;
+  const parsedLimit = parseInt(limit, 10) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE 1=1';
@@ -394,8 +394,8 @@ async function deletePlan(req, res) {
 
 async function getSettlements(req, res) {
   const { page, limit, startDate, endDate, restaurantId, search } = req.query;
-  const parsedPage = parseInt(page) || 1;
-  const parsedLimit = parseInt(limit) || 20;
+  const parsedPage = parseInt(page, 10) || 1;
+  const parsedLimit = parseInt(limit, 10) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
   let where = 'WHERE 1=1';
   const params = [];

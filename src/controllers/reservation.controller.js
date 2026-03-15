@@ -9,8 +9,8 @@ const { buildOrderNumber } = require('../utils/orderHelpers');
 
 async function getReservations(req, res) {
   const { date, status, page = 1, limit = 20 } = req.query;
-  const parsedPage = parseInt(page) || 1;
-  const parsedLimit = parseInt(limit) || 20;
+  const parsedPage = parseInt(page, 10) || 1;
+  const parsedLimit = parseInt(limit, 10) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE r.restaurant_id = ?';
@@ -32,7 +32,7 @@ async function getReservations(req, res) {
     [...params, parsedLimit, offset]
   );
 
-  return success(res, { reservations: rows, total: countRows[0].total, page: parseInt(page) });
+  return success(res, { reservations: rows, total: countRows[0].total, page: parsedPage });
 }
 
 async function getReservationById(req, res) {

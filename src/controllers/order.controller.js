@@ -12,8 +12,8 @@ const { checkFeature } = require('../utils/featureEngine');
 
 async function getOrders(req, res) {
   const { page, limit, status, tableId, floorId, search, date, dateFrom, dateTo } = req.query;
-  const parsedPage = parseInt(page) || 1;
-  const parsedLimit = parseInt(limit) || 20;
+  const parsedPage = parseInt(page, 10) || 1;
+  const parsedLimit = parseInt(limit, 10) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE o.restaurant_id = ?';
@@ -847,8 +847,8 @@ async function getCustomerByPhone(req, res) {
 async function getCustomers(req, res) {
   const { page, limit, search, dateFrom, dateTo } = req.query;
   const restaurantId = req.user.restaurantId;
-  const parsedPage = parseInt(page) || 1;
-  const parsedLimit = parseInt(limit) || 20;
+  const parsedPage = parseInt(page, 10) || 1;
+  const parsedLimit = parseInt(limit, 10) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE o.restaurant_id = ? AND (o.customer_phone IS NOT NULL AND o.customer_phone != "")';
@@ -895,8 +895,8 @@ async function getCustomers(req, res) {
 async function getCustomerOrders(req, res) {
   const { phone } = req.params;
   const { page, limit } = req.query;
-  const parsedPage = parseInt(page) || 1;
-  const parsedLimit = parseInt(limit) || 20;
+  const parsedPage = parseInt(page, 10) || 1;
+  const parsedLimit = parseInt(limit, 10) || 20;
   const restaurantId = req.user.restaurantId;
   const offset = (parsedPage - 1) * parsedLimit;
 

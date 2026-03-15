@@ -196,8 +196,8 @@ async function createInstamojoPaymentLink(req, res) {
 
 async function getPayments(req, res) {
   const { page, limit, startDate, endDate, mode } = req.query;
-  const parsedPage = parseInt(page) || 1;
-  const parsedLimit = parseInt(limit) || 20;
+  const parsedPage = parseInt(page, 10) || 1;
+  const parsedLimit = parseInt(limit, 10) || 20;
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE p.restaurant_id = ?';
