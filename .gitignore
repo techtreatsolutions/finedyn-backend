@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.staging
+
+# Firebase service account key (NEVER commit)
+firebase-service-account.json
+
+# Logs
+*.log
+npm-debug.log*
+temp_test.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Uploads (if stored locally)
+uploads/
+temp/
+
+# Coverage
+coverage/
+.nyc_output/

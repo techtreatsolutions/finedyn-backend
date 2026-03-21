@@ -271,4 +271,23 @@ async function logout(req, res) {
   return success(res, null, 'Logged out successfully.');
 }
 
-module.exports = { login, register, forgotPassword, resetPassword, getProfile, updateProfile, changePassword, logout, pinLogin };
+async function registerDevice(req, res) {
+  const { fcmToken, platform } = req.body;
+  if (!fcmToken) return error(res, 'fcmToken is required.', HTTP_STATUS.BAD_REQUEST);
+
+  const { registerDeviceToken } = require('../utils/firebase');
+  const ok = await registerDeviceToken(req.user.id, req.user.restaurantId, fcmToken, platform || 'android');
+  if (!ok) return error(res, 'Failed to register device.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  return success(res, null, 'Device registered for push notifications.');
+}
+
+async function unregisterDevice(req, res) {
+  const { fcmToken } = req.body;
+  if (!fcmToken) return error(res, 'fcmToken is required.', HTTP_STATUS.BAD_REQUEST);
+
+  const { unregisterDeviceToken } = require('../utils/firebase');
+  await unregisterDeviceToken(fcmToken);
+  return success(res, null, 'Device unregistered.');
+}
+
+module.exports = { login, register, forgotPassword, resetPassword, getProfile, updateProfile, changePassword, logout, pinLogin, registerDevice, unregisterDevice };

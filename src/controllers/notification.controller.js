@@ -3,14 +3,17 @@
 const { query } = require('../config/database');
 const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS } = require('../config/constants');
+const { sendPushToUser, sendPushToAdmins, sendPushToRole, sendPushToRestaurant } = require('../utils/firebase');
 
-/* ── Helper: insert one notification ── */
+/* ── Helper: insert one notification + push ── */
 async function notifyUser(userId, type, title, message, restaurantId = null) {
   try {
     await query(
       'INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
       [userId, type, title, message || null, restaurantId]
     );
+    // Also send push notification (non-blocking)
+    sendPushToUser(userId, title, message || '', { type, restaurantId: String(restaurantId || '') }).catch(() => {});
   } catch (_) { /* non-critical, never throw */ }
 }
 
@@ -34,6 +37,32 @@ async function notifyRestaurantOwner(restaurantId, type, title, message) {
     for (const owner of (owners || [])) {
       await notifyUser(owner.id, type, title, message, restaurantId);
     }
+    // Also push to all admins (owner + manager) of this restaurant
+    sendPushToAdmins(restaurantId, title, message || '', { type }).catch(() => {});
+  } catch (_) { /* non-critical */ }
+}
+
+/* ── Helper: notify kitchen staff of a restaurant (for KOT) ── */
+async function notifyKitchenStaff(restaurantId, title, message) {
+  try {
+    const [staff] = await query(
+      "SELECT id FROM users WHERE restaurant_id = ? AND role = 'kitchen_staff' AND is_active = 1",
+      [restaurantId]
+    );
+    for (const s of (staff || [])) {
+      await query(
+        'INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
+        [s.id, 'order', title, message || null, restaurantId]
+      );
+    }
+    sendPushToRole(restaurantId, 'kitchen_staff', title, message || '', { type: 'kot' }).catch(() => {});
+  } catch (_) { /* non-critical */ }
+}
+
+/* ── Helper: notify waiters of a restaurant (order ready) ── */
+async function notifyWaiters(restaurantId, title, message) {
+  try {
+    sendPushToRole(restaurantId, 'waiter', title, message || '', { type: 'order_ready' }).catch(() => {});
   } catch (_) { /* non-critical */ }
 }
 
@@ -151,4 +180,6 @@ module.exports = {
   notifyUser,
   notifySuperAdmins,
   notifyRestaurantOwner,
+  notifyKitchenStaff,
+  notifyWaiters,
 };

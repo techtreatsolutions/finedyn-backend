@@ -865,6 +865,25 @@ CREATE TABLE IF NOT EXISTS `employee_advances` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
+-- DEVICE TOKENS - FCM push notification tokens
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `device_tokens` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `user_id` INT NOT NULL,
+  `restaurant_id` INT DEFAULT NULL,
+  `fcm_token` VARCHAR(512) NOT NULL,
+  `platform` ENUM('android', 'ios', 'web') NOT NULL DEFAULT 'android',
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY `uq_device_token` (`fcm_token`),
+  INDEX `idx_device_user` (`user_id`),
+  INDEX `idx_device_restaurant` (`restaurant_id`),
+  CONSTRAINT `fk_device_user` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_device_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
 -- DEFAULT DATA
 -- ============================================================
 INSERT INTO `plans` (`id`, `name`, `description`, `price_monthly`, `price_yearly`, `max_floors`, `max_tables`, `max_menu_items`, `max_staff`, `max_bills_per_day`, `max_bills_per_month`, `feature_waiter_app`, `feature_online_ordering`, `feature_reservations`, `feature_inventory`, `feature_expense_management`, `feature_employee_management`, `feature_kds`, `feature_analytics`, `is_active`, `is_default`, `target_type`, `sort_order`)

@@ -14,5 +14,7 @@ router.post('/reset-password', ctrl.resetPassword);
 router.get('/profile', authenticate, ctrl.getProfile);
 router.put('/profile', authenticate, ctrl.updateProfile);
 router.post('/change-password', authenticate, ctrl.changePassword);
+router.post('/register-device', authenticate, ctrl.registerDevice);
+router.post('/unregister-device', authenticate, ctrl.unregisterDevice);
 
 module.exports = router;

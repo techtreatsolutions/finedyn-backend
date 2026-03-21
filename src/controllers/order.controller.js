@@ -3,7 +3,7 @@
 const { query, transaction } = require('../config/database');
 const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS, ORDER_STATUS, PAYMENT_STATUS } = require('../config/constants');
-const { notifyRestaurantOwner } = require('./notification.controller');
+const { notifyRestaurantOwner, notifyKitchenStaff, notifyWaiters } = require('./notification.controller');
 const { buildOrderNumber, recalcOrder } = require('../utils/orderHelpers');
 const { generateTablePin } = require('../utils/pinHelper');
 const { checkFeature } = require('../utils/featureEngine');
@@ -374,6 +374,14 @@ async function sendKOT(req, res) {
     }
   }
   const items = Array.from(kotMap.values());
+
+  // Notify kitchen staff about new KOT (non-blocking)
+  const tableInfo = updatedOrder[0].table_number ? ` (Table ${updatedOrder[0].table_number})` : '';
+  notifyKitchenStaff(
+    req.user.restaurantId,
+    `New KOT: #${updatedOrder[0].order_number}`,
+    `${pendingItems.length} item(s) sent to kitchen${tableInfo}`
+  ).catch(() => {});
 
   return success(res, {
     itemsSent: pendingItems.length,
@@ -747,6 +755,15 @@ async function updateKitchenItemStatus(req, res) {
         await conn.execute("UPDATE orders SET status = 'ready' WHERE id = ? AND status NOT IN ('completed', 'cancelled')", [orderId]);
       } else if (allReadyOrServed) {
         await conn.execute("UPDATE orders SET status = 'ready' WHERE id = ? AND status IN ('pending', 'confirmed', 'preparing')", [orderId]);
+      }
+
+      // Notify waiters & admins when all items are ready
+      if (allReadyOrServed) {
+        const [orderInfo] = await conn.execute('SELECT order_number, table_id FROM orders WHERE id = ?', [orderId]);
+        const orderNum = orderInfo[0]?.order_number || orderId;
+        const tableRef = orderInfo[0]?.table_id ? ` is ready for serving` : ' is ready';
+        notifyWaiters(req.user.restaurantId, `Order #${orderNum} Ready`, `Order #${orderNum}${tableRef}`).catch(() => {});
+        notifyRestaurantOwner(req.user.restaurantId, 'order', `Order #${orderNum} Ready`, `All items in order #${orderNum} are ready.`).catch(() => {});
       }
     }
   });
