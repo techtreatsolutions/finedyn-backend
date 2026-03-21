@@ -6,10 +6,10 @@ const mysql = require('mysql2/promise');
 const baseConfig = {
   waitForConnections: true,
   connectionLimit: 20,
-  queueLimit: 0,
+  queueLimit: 100,
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
-  timezone: '+00:00',
+  timezone: '+05:30',
   decimalNumbers: true,
   dateStrings: false,
 };

@@ -257,6 +257,11 @@ async function addVariant(req, res) {
   const { itemId } = req.params;
   const { name, price } = req.body;
   if (!name || price === undefined) return error(res, 'name and price are required.', HTTP_STATUS.BAD_REQUEST);
+
+  // Verify menu item belongs to user's restaurant
+  const [itemRows] = await query('SELECT id FROM menu_items WHERE id = ? AND restaurant_id = ?', [itemId, req.user.restaurantId]);
+  if (!itemRows || itemRows.length === 0) return error(res, 'Menu item not found.', HTTP_STATUS.NOT_FOUND);
+
   const [result] = await query('INSERT INTO menu_item_variants (menu_item_id, name, price) VALUES (?, ?, ?)', [itemId, name, price]);
   return success(res, { id: result.insertId }, 'Variant added.', HTTP_STATUS.CREATED);
 }
@@ -265,15 +270,15 @@ async function updateVariant(req, res) {
   const { variantId } = req.params;
   const { name, price, isAvailable } = req.body;
   await query(
-    'UPDATE menu_item_variants SET name = COALESCE(?, name), price = COALESCE(?, price), is_available = COALESCE(?, is_available) WHERE id = ?',
-    [name || null, price || null, isAvailable !== undefined ? (isAvailable ? 1 : 0) : null, variantId]
+    'UPDATE menu_item_variants SET name = COALESCE(?, name), price = COALESCE(?, price), is_available = COALESCE(?, is_available) WHERE id = ? AND menu_item_id IN (SELECT id FROM menu_items WHERE restaurant_id = ?)',
+    [name || null, price || null, isAvailable !== undefined ? (isAvailable ? 1 : 0) : null, variantId, req.user.restaurantId]
   );
   return success(res, null, 'Variant updated.');
 }
 
 async function deleteVariant(req, res) {
   const { variantId } = req.params;
-  await query('DELETE FROM menu_item_variants WHERE id = ?', [variantId]);
+  await query('DELETE FROM menu_item_variants WHERE id = ? AND menu_item_id IN (SELECT id FROM menu_items WHERE restaurant_id = ?)', [variantId, req.user.restaurantId]);
   return success(res, null, 'Variant deleted.');
 }
 

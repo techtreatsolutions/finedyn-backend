@@ -32,12 +32,19 @@ const reservationRoutes = require('./routes/reservation.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const qrRoutes = require('./routes/qr.routes');
 const qrOrderRoutes = require('./routes/qrOrders.routes');
+const ebillRoutes = require('./routes/ebill.routes');
+const publicFormsRoutes = require('./routes/publicForms.routes');
 
 const app = express();
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
 // Security
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: false,
+  hsts: { maxAge: 31536000, includeSubDomains: true },
+}));
 
 // CORS
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',').map(o => o.trim());
@@ -54,19 +61,24 @@ app.use(cors({
 // Middleware
 app.use(compression());
 if (process.env.NODE_ENV !== 'test') app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // Rate limiting
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 500,
+  windowMs: 15 * 60 * 1000, max: 200,
   standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many requests.' },
 });
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 100,
+  windowMs: 15 * 60 * 1000, max: 15,
   standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many auth attempts. Try again in 15 minutes.' },
+});
+const publicLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 30,
+  standardHeaders: true, legacyHeaders: false,
+  message: { success: false, message: 'Too many requests.' },
 });
 app.use('/api/', globalLimiter);
 
@@ -99,6 +111,8 @@ app.use('/api/reservations', reservationRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/qr', qrRoutes);
 app.use('/api/qr-orders', qrOrderRoutes);
+app.use('/api/ebill', publicLimiter, ebillRoutes);
+app.use('/api/public', publicLimiter, publicFormsRoutes);
 
 // 404
 app.use((req, res) => errorResponse(res, `Route not found: ${req.method} ${req.originalUrl}`, HTTP_STATUS.NOT_FOUND));
@@ -108,7 +122,7 @@ app.use((req, res) => errorResponse(res, `Route not found: ${req.method} ${req.o
 app.use((err, req, res, next) => {
   if (err.message?.startsWith('CORS')) return errorResponse(res, err.message, HTTP_STATUS.FORBIDDEN);
   if (err.type === 'entity.parse.failed') return errorResponse(res, 'Invalid JSON.', HTTP_STATUS.BAD_REQUEST);
-  console.error('[Error]', err.stack || err.message);
+  console.error(`[Error] ${new Date().toISOString()} ${req.method} ${req.originalUrl}`, err.stack || err.message);
   const statusCode = err.statusCode || err.status || HTTP_STATUS.INTERNAL_SERVER_ERROR;
   const message = process.env.NODE_ENV === 'production' ? 'An internal server error occurred.' : err.message;
   return errorResponse(res, message, statusCode);

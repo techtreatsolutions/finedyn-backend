@@ -8,6 +8,56 @@ const { HTTP_STATUS } = require('../config/constants');
 const { buildOrderNumber, recalcOrder } = require('../utils/orderHelpers');
 const { generateTablePin } = require('../utils/pinHelper');
 const { checkFeature } = require('../utils/featureEngine');
+const { requestOTP, verifyOTP } = require('../utils/whatsappOtp');
+const { decrypt } = require('../utils/encryption');
+const { notifyRestaurantOwner } = require('./notification.controller');
+
+/**
+ * Initiate a refund for a given payment via the restaurant's active gateway.
+ * @param {number} restaurantId
+ * @param {string} paymentId — Gateway-specific payment ID (Razorpay: pay_xxx, Instamojo: MOJO_xxx)
+ * @returns {object} Refund response
+ */
+async function initiateRefund(restaurantId, paymentId) {
+  const [gwRows] = await query(
+    "SELECT * FROM payment_gateway_settings WHERE restaurant_id = ? AND is_active = 1 LIMIT 1",
+    [restaurantId]
+  );
+  if (!gwRows || gwRows.length === 0) throw new Error('Payment gateway not configured');
+  const gw = gwRows[0];
+
+  if (gw.gateway === 'razorpay') {
+    let Razorpay;
+    try { Razorpay = require('razorpay'); } catch (e) { throw new Error('Razorpay package not installed'); }
+    const razorpay = new Razorpay({
+      key_id: decrypt(gw.api_key_encrypted),
+      key_secret: decrypt(gw.api_secret_encrypted),
+    });
+    const refund = await razorpay.payments.refund(paymentId, { speed: 'normal' });
+    return refund;
+  }
+
+  if (gw.gateway === 'instamojo') {
+    const axios = require('axios');
+    const refundRes = await axios.post(
+      'https://www.instamojo.com/api/1.1/refunds/',
+      {
+        payment_id: paymentId,
+        type: 'QFL',
+        body: 'Order cancelled — customer refund',
+      },
+      {
+        headers: {
+          'X-Api-Key': decrypt(gw.api_key_encrypted),
+          'X-Auth-Token': decrypt(gw.api_secret_encrypted),
+        },
+      }
+    );
+    return refundRes.data.refund;
+  }
+
+  throw new Error('Unsupported payment gateway');
+}
 
 /* ════════════════════════════════════════════════════════════════════════════
    PUBLIC ENDPOINTS (no auth — customer-facing)
@@ -541,17 +591,34 @@ async function acceptQROrder(req, res) {
 async function rejectQROrder(req, res) {
   try {
     const { id } = req.params;
-    const { reason } = req.body;
+    const { reason, initiateRefund: shouldRefund } = req.body;
 
     const [rows] = await query(
-      "SELECT id FROM qr_orders WHERE id = ? AND restaurant_id = ? AND status = 'pending' LIMIT 1",
+      "SELECT id, razorpay_payment_id FROM qr_orders WHERE id = ? AND restaurant_id = ? AND status = 'pending' LIMIT 1",
       [id, req.user.restaurantId]
     );
     if (!rows || rows.length === 0) return error(res, 'QR order not found or already processed.', HTTP_STATUS.NOT_FOUND);
 
+    let refundStatus = null;
+    if (rows[0].razorpay_payment_id) {
+      if (shouldRefund) {
+        try {
+          await initiateRefund(req.user.restaurantId, rows[0].razorpay_payment_id);
+          refundStatus = 'refunded';
+        } catch (refundErr) {
+          console.error('[QR] Auto-refund on reject failed:', refundErr);
+          refundStatus = 'not_refunded';
+          await query("UPDATE qr_orders SET status = 'rejected', reject_reason = ?, refund_status = ? WHERE id = ?", [reason || null, refundStatus, id]);
+          return success(res, null, 'QR order rejected but refund failed. Please process refund manually.');
+        }
+      } else {
+        refundStatus = 'not_refunded';
+      }
+    }
+
     await query(
-      "UPDATE qr_orders SET status = 'rejected', reject_reason = ? WHERE id = ?",
-      [reason || null, id]
+      "UPDATE qr_orders SET status = 'rejected', reject_reason = ?, refund_status = ? WHERE id = ?",
+      [reason || null, refundStatus, id]
     );
 
     return success(res, null, 'QR order rejected.');
@@ -595,7 +662,7 @@ async function generateTableQR(req, res) {
       }, 'QR code already exists.');
     }
 
-    // Build permanent QR URL (no session token)
+    // Build permanent QR URL — TableQRRouter decides POSS vs QR flow on the frontend
     const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0].trim();
     const qrUrl = `${frontendUrl}/qr/${slug}/${tableId}`;
 
@@ -679,18 +746,696 @@ async function downloadTableQR(req, res) {
   }
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   QR MODEL — PUBLIC ENDPOINTS (no auth, no PIN)
+   For restaurants with type = 'qr'
+   ════════════════════════════════════════════════════════════════════════════ */
+
+// GET /api/qr/:restaurantSlug/info — restaurant info + QR settings
+async function getQRRestaurantInfo(req, res) {
+  try {
+    const { restaurantSlug } = req.params;
+    const [rRows] = await query(
+      'SELECT id, name, slug, logo_url, currency, type FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1',
+      [restaurantSlug]
+    );
+    if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+    const restaurant = rRows[0];
+
+    // Fetch QR settings
+    const [qsRows] = await query('SELECT * FROM qr_settings WHERE restaurant_id = ? LIMIT 1', [restaurant.id]);
+    const qrSettings = qsRows && qsRows.length > 0 ? qsRows[0] : { enable_dine_in: 1, enable_takeaway: 1, enable_delivery: 0, payment_acceptance: 'both' };
+
+    // Tax toggle comes from bill_format_settings (the single source of truth)
+    const [bfTaxRows] = await query('SELECT enable_tax FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1', [restaurant.id]);
+    const enableTax = bfTaxRows && bfTaxRows.length > 0 ? bfTaxRows[0].enable_tax !== 0 : true;
+
+    // Check if restaurant has an active payment gateway
+    const [gwRows] = await query(
+      'SELECT id, gateway FROM payment_gateway_settings WHERE restaurant_id = ? AND is_active = 1 LIMIT 1',
+      [restaurant.id]
+    );
+    const hasPaymentGateway = gwRows && gwRows.length > 0;
+    const paymentGateway = hasPaymentGateway ? gwRows[0].gateway : null;
+
+    return success(res, {
+      restaurant: { id: restaurant.id, name: restaurant.name, slug: restaurant.slug, logoUrl: restaurant.logo_url, currency: restaurant.currency, type: restaurant.type, enableTax },
+      qrSettings: {
+        enableDineIn: !!qrSettings.enable_dine_in,
+        enableTakeaway: !!qrSettings.enable_takeaway,
+        enableDelivery: !!qrSettings.enable_delivery,
+        paymentAcceptance: qrSettings.payment_acceptance,
+        enableTax,
+      },
+      hasPaymentGateway,
+      paymentGateway,
+    });
+  } catch (err) {
+    console.error('[QR] getQRRestaurantInfo error:', err);
+    return error(res, 'Failed to get restaurant info.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// GET /api/qr/:restaurantSlug/floors-tables — public list for dine-in table selection
+async function getQRFloorsTables(req, res) {
+  try {
+    const { restaurantSlug } = req.params;
+    const [rRows] = await query('SELECT id FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
+    if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+    const restaurantId = rRows[0].id;
+
+    const [floors] = await query('SELECT id, name FROM floors WHERE restaurant_id = ? AND is_active = 1 ORDER BY name ASC', [restaurantId]);
+    const [tables] = await query('SELECT id, floor_id, table_number, capacity FROM tables WHERE restaurant_id = ? AND is_active = 1 ORDER BY table_number ASC', [restaurantId]);
+
+    const result = (floors || []).map(f => ({
+      ...f,
+      tables: (tables || []).filter(t => t.floor_id === f.id),
+    }));
+
+    return success(res, result);
+  } catch (err) {
+    console.error('[QR] getQRFloorsTables error:', err);
+    return error(res, 'Failed to get floors and tables.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// GET /api/qr/:restaurantSlug/table-info?tableId=X — public endpoint to get table details for dine-in QR
+async function getQRTableInfo(req, res) {
+  try {
+    const { restaurantSlug } = req.params;
+    const { tableId } = req.query;
+    if (!tableId) return error(res, 'tableId is required.', HTTP_STATUS.BAD_REQUEST);
+
+    const [rRows] = await query('SELECT id FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
+    if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+
+    const [tRows] = await query(
+      `SELECT t.id, t.table_number, t.capacity, f.id AS floor_id, f.name AS floor_name
+       FROM tables t LEFT JOIN floors f ON f.id = t.floor_id
+       WHERE t.id = ? AND t.restaurant_id = ? AND t.is_active = 1 LIMIT 1`,
+      [tableId, rRows[0].id]
+    );
+    if (!tRows || tRows.length === 0) return error(res, 'Table not found.', HTTP_STATUS.NOT_FOUND);
+
+    return success(res, tRows[0]);
+  } catch (err) {
+    console.error('[QR] getQRTableInfo error:', err);
+    return error(res, 'Failed to get table info.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// POST /api/qr/:restaurantSlug/order — place order without PIN/session (QR model)
+async function placeQRModelOrder(req, res) {
+  try {
+    const { restaurantSlug } = req.params;
+    const { orderType, tableId, customerName, customerPhone, deliveryAddress, items, specialInstructions, paymentPreference, razorpayOrderId, razorpayPaymentId } = req.body;
+
+    if (!items || !items.length) return error(res, 'Items are required.', HTTP_STATUS.BAD_REQUEST);
+    if (!orderType) return error(res, 'Order type is required.', HTTP_STATUS.BAD_REQUEST);
+
+    const [rRows] = await query('SELECT id FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
+    if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+    const restaurantId = rRows[0].id;
+
+    // Validate order type against QR settings
+    const [qsRows] = await query('SELECT * FROM qr_settings WHERE restaurant_id = ? LIMIT 1', [restaurantId]);
+    const qs = qsRows && qsRows.length > 0 ? qsRows[0] : { enable_dine_in: 1, enable_takeaway: 1, enable_delivery: 0, payment_acceptance: 'both' };
+
+    // Tax toggle from bill_format_settings (single source of truth)
+    const [bfTaxRows2] = await query('SELECT enable_tax FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1', [restaurantId]);
+    const enableTax = bfTaxRows2 && bfTaxRows2.length > 0 ? bfTaxRows2[0].enable_tax !== 0 : true;
+
+    // Dine-in from table QR (tableId provided) is always allowed; standalone dine-in respects qr_settings
+    if (orderType === 'dine_in' && !qs.enable_dine_in && !tableId) return error(res, 'Dine-in orders are not enabled.', HTTP_STATUS.BAD_REQUEST);
+    if (orderType === 'takeaway' && !qs.enable_takeaway) return error(res, 'Takeaway orders are not enabled.', HTTP_STATUS.BAD_REQUEST);
+    if (orderType === 'delivery' && !qs.enable_delivery) return error(res, 'Delivery orders are not enabled.', HTTP_STATUS.BAD_REQUEST);
+
+    if (orderType === 'dine_in' && !tableId) return error(res, 'Table selection is required for dine-in orders.', HTTP_STATUS.BAD_REQUEST);
+    if (orderType === 'delivery' && !deliveryAddress) return error(res, 'Delivery address is required.', HTTP_STATUS.BAD_REQUEST);
+
+    // Determine payment preference
+    const pref = paymentPreference === 'online' ? 'online' : 'counter';
+
+    // For counter payment, phone must be verified via OTP
+    if (pref === 'counter') {
+      if (!customerPhone) return error(res, 'Phone number is required for pay-at-counter orders.', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    // Validate & enrich items (same logic as placeQROrder)
+    const enrichedItems = [];
+    for (const item of items) {
+      const { menuItemId, variantId, quantity, notes, addonIds } = item;
+      if (!menuItemId || !quantity || quantity < 1) continue;
+
+      let itemName, itemPrice, taxRate;
+      if (variantId) {
+        const [vRows] = await query(
+          `SELECT mi.name AS item_name, mi.tax_rate, mv.name AS variant_name, mv.price
+           FROM menu_item_variants mv JOIN menu_items mi ON mi.id = mv.menu_item_id
+           WHERE mv.id = ? AND mi.id = ? AND mi.restaurant_id = ? LIMIT 1`,
+          [variantId, menuItemId, restaurantId]
+        );
+        if (!vRows || vRows.length === 0) continue;
+        itemName = `${vRows[0].item_name} (${vRows[0].variant_name})`;
+        itemPrice = parseFloat(vRows[0].price);
+        taxRate = parseFloat(vRows[0].tax_rate || 0);
+      } else {
+        const [iRows] = await query(
+          'SELECT name, price, tax_rate FROM menu_items WHERE id = ? AND restaurant_id = ? AND is_available = 1 LIMIT 1',
+          [menuItemId, restaurantId]
+        );
+        if (!iRows || iRows.length === 0) continue;
+        itemName = iRows[0].name;
+        itemPrice = parseFloat(iRows[0].price);
+        taxRate = parseFloat(iRows[0].tax_rate || 0);
+      }
+
+      let addonDetails = null;
+      let addonPerUnit = 0;
+      if (addonIds && addonIds.length > 0) {
+        const ph = addonIds.map(() => '?').join(',');
+        const [addonRows] = await query(
+          `SELECT id, name, price FROM menu_item_addons WHERE id IN (${ph}) AND menu_item_id = ? AND is_available = 1`,
+          [...addonIds, menuItemId]
+        );
+        if (addonRows && addonRows.length > 0) {
+          addonDetails = addonRows.map(a => ({ id: a.id, name: a.name, price: parseFloat(a.price) }));
+          addonPerUnit = addonDetails.reduce((sum, a) => sum + a.price, 0);
+        }
+      }
+
+      enrichedItems.push({
+        menuItemId, variantId: variantId || null, quantity,
+        itemName, itemPrice, taxRate,
+        addonIds: addonIds || [], addonDetails, addonPerUnit,
+        notes: notes || null,
+      });
+    }
+
+    if (enrichedItems.length === 0) return error(res, 'No valid items found.', HTTP_STATUS.BAD_REQUEST);
+
+    const [result] = await query(
+      `INSERT INTO qr_orders (restaurant_id, table_id, order_type, customer_name, customer_phone, delivery_address, items, special_instructions, payment_preference, razorpay_order_id, razorpay_payment_id, tax_enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [restaurantId, tableId || null, orderType, customerName || null, customerPhone || null,
+        orderType === 'delivery' ? (deliveryAddress || null) : null,
+        JSON.stringify(enrichedItems), specialInstructions || null, pref,
+        razorpayOrderId || null, razorpayPaymentId || null, enableTax ? 1 : 0]
+    );
+
+    return success(res, { qrOrderId: result.insertId }, 'Order placed! Waiting for restaurant confirmation.', HTTP_STATUS.CREATED);
+  } catch (err) {
+    console.error('[QR] placeQRModelOrder error:', err);
+    return error(res, 'Failed to place order.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// POST /api/qr/:restaurantSlug/create-payment — create Razorpay order for online QR payment
+async function createQRPayment(req, res) {
+  try {
+    const { restaurantSlug } = req.params;
+    const { items, orderType } = req.body;
+    if (!items || !items.length) return error(res, 'Items are required.', HTTP_STATUS.BAD_REQUEST);
+
+    const [rRows] = await query('SELECT id FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
+    if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+    const restaurantId = rRows[0].id;
+
+    // Tax toggle from bill_format_settings (single source of truth)
+    const [bfTaxRows] = await query('SELECT enable_tax FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1', [restaurantId]);
+    const enableTax = bfTaxRows && bfTaxRows.length > 0 ? bfTaxRows[0].enable_tax !== 0 : true;
+
+    // Enrich items and compute total
+    let subtotal = 0;
+    let taxTotal = 0;
+    for (const item of items) {
+      const { menuItemId, variantId, quantity, addonIds } = item;
+      if (!menuItemId || !quantity || quantity < 1) continue;
+      let itemPrice, taxRate;
+      if (variantId) {
+        const [vRows] = await query(
+          `SELECT mi.tax_rate, mv.price FROM menu_item_variants mv JOIN menu_items mi ON mi.id = mv.menu_item_id WHERE mv.id = ? AND mi.id = ? AND mi.restaurant_id = ? LIMIT 1`,
+          [variantId, menuItemId, restaurantId]);
+        if (!vRows || vRows.length === 0) continue;
+        itemPrice = parseFloat(vRows[0].price);
+        taxRate = parseFloat(vRows[0].tax_rate || 0);
+      } else {
+        const [iRows] = await query('SELECT price, tax_rate FROM menu_items WHERE id = ? AND restaurant_id = ? AND is_available = 1 LIMIT 1', [menuItemId, restaurantId]);
+        if (!iRows || iRows.length === 0) continue;
+        itemPrice = parseFloat(iRows[0].price);
+        taxRate = parseFloat(iRows[0].tax_rate || 0);
+      }
+      let addonPerUnit = 0;
+      if (addonIds && addonIds.length > 0) {
+        const ph = addonIds.map(() => '?').join(',');
+        const [addonRows] = await query(`SELECT price FROM menu_item_addons WHERE id IN (${ph}) AND menu_item_id = ? AND is_available = 1`, [...addonIds, menuItemId]);
+        if (addonRows) addonPerUnit = addonRows.reduce((s, a) => s + parseFloat(a.price), 0);
+      }
+      const lineTotal = (itemPrice + addonPerUnit) * quantity;
+      subtotal += lineTotal;
+      if (enableTax) taxTotal += lineTotal * taxRate / 100;
+    }
+
+    const grandTotal = subtotal + taxTotal;
+    if (grandTotal <= 0) return error(res, 'Invalid order total.', HTTP_STATUS.BAD_REQUEST);
+
+    // Get active payment gateway
+    const [gwRows] = await query(
+      "SELECT * FROM payment_gateway_settings WHERE restaurant_id = ? AND is_active = 1 LIMIT 1",
+      [restaurantId]);
+    if (!gwRows || gwRows.length === 0) return error(res, 'Payment gateway not configured.', HTTP_STATUS.BAD_REQUEST);
+    const gw = gwRows[0];
+
+    if (gw.gateway === 'razorpay') {
+      let Razorpay;
+      try { Razorpay = require('razorpay'); } catch (e) {
+        return error(res, 'Razorpay package not installed.', HTTP_STATUS.SERVER_ERROR);
+      }
+      const razorpay = new Razorpay({ key_id: decrypt(gw.api_key_encrypted), key_secret: decrypt(gw.api_secret_encrypted) });
+
+      const rpOrder = await razorpay.orders.create({
+        amount: Math.round(grandTotal * 100),
+        currency: 'INR',
+        receipt: `qr_${restaurantId}_${Date.now()}`,
+        notes: { restaurantId: String(restaurantId), orderType: orderType || 'takeaway' },
+      });
+
+      return success(res, {
+        gateway: 'razorpay',
+        razorpayOrderId: rpOrder.id,
+        amount: rpOrder.amount,
+        currency: rpOrder.currency,
+        keyId: decrypt(gw.api_key_encrypted),
+      });
+    }
+
+    if (gw.gateway === 'instamojo') {
+      const axios = require('axios');
+      const redirectUrl = `${process.env.FRONTEND_URL}/qr/${restaurantSlug}/order`;
+
+      const imResponse = await axios.post(
+        'https://www.instamojo.com/api/1.1/payment-requests/',
+        {
+          purpose: `QR Order — ${orderType || 'takeaway'}`,
+          amount: grandTotal.toFixed(2),
+          buyer_name: req.body.customerName || 'Guest',
+          phone: req.body.customerPhone || '',
+          redirect_url: redirectUrl,
+          allow_repeated_payments: false,
+        },
+        {
+          headers: {
+            'X-Api-Key': decrypt(gw.api_key_encrypted),
+            'X-Auth-Token': decrypt(gw.api_secret_encrypted),
+          },
+        }
+      );
+
+      const payReq = imResponse.data.payment_request;
+      return success(res, {
+        gateway: 'instamojo',
+        paymentRequestId: payReq.id,
+        paymentUrl: payReq.longurl,
+        amount: Math.round(grandTotal * 100),
+      });
+    }
+
+    return error(res, 'Unsupported payment gateway.', HTTP_STATUS.BAD_REQUEST);
+  } catch (err) {
+    console.error('[QR] createQRPayment error:', err);
+    return error(res, 'Failed to create payment.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// POST /api/qr/:restaurantSlug/verify-payment — verify payment (Razorpay signature or Instamojo status)
+async function verifyQRPayment(req, res) {
+  try {
+    const { restaurantSlug } = req.params;
+    const { gateway: gwType, razorpayOrderId, razorpayPaymentId, razorpaySignature, paymentRequestId, paymentId } = req.body;
+
+    const [rRows] = await query('SELECT id FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
+    if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+    const restaurantId = rRows[0].id;
+
+    const [gwRows] = await query(
+      "SELECT * FROM payment_gateway_settings WHERE restaurant_id = ? AND is_active = 1 LIMIT 1",
+      [restaurantId]);
+    if (!gwRows || gwRows.length === 0) return error(res, 'Payment gateway not configured.', HTTP_STATUS.BAD_REQUEST);
+    const gw = gwRows[0];
+
+    if (gw.gateway === 'razorpay') {
+      if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
+        return error(res, 'Payment details are required.', HTTP_STATUS.BAD_REQUEST);
+      }
+      const body = razorpayOrderId + '|' + razorpayPaymentId;
+      const expectedSig = crypto.createHmac('sha256', decrypt(gw.api_secret_encrypted)).update(body).digest('hex');
+      if (expectedSig !== razorpaySignature) return error(res, 'Payment verification failed.', HTTP_STATUS.BAD_REQUEST);
+      return success(res, { verified: true, gateway: 'razorpay' }, 'Payment verified.');
+    }
+
+    if (gw.gateway === 'instamojo') {
+      if (!paymentRequestId || !paymentId) {
+        return error(res, 'Payment details are required.', HTTP_STATUS.BAD_REQUEST);
+      }
+      const axios = require('axios');
+      const imRes = await axios.get(
+        `https://www.instamojo.com/api/1.1/payment-requests/${paymentRequestId}/${paymentId}/`,
+        {
+          headers: {
+            'X-Api-Key': decrypt(gw.api_key_encrypted),
+            'X-Auth-Token': decrypt(gw.api_secret_encrypted),
+          },
+        }
+      );
+      const payment = imRes.data.payment_request;
+      if (payment.status !== 'Completed') return error(res, 'Payment not completed.', HTTP_STATUS.BAD_REQUEST);
+      return success(res, { verified: true, gateway: 'instamojo', instamojoPaymentId: paymentId }, 'Payment verified.');
+    }
+
+    return error(res, 'Unsupported payment gateway.', HTTP_STATUS.BAD_REQUEST);
+  } catch (err) {
+    console.error('[QR] verifyQRPayment error:', err);
+    return error(res, 'Payment verification failed.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// POST /api/qr/:restaurantSlug/refund-payment — auto-refund when order placement fails after payment
+async function refundQRPayment(req, res) {
+  try {
+    const { restaurantSlug } = req.params;
+    const { paymentId } = req.body;
+    if (!paymentId) return error(res, 'Payment ID is required.', HTTP_STATUS.BAD_REQUEST);
+
+    const [rRows] = await query('SELECT id FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
+    if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+
+    const refund = await initiateRefund(rRows[0].id, paymentId);
+    return success(res, { refundId: refund.id }, 'Refund initiated successfully.');
+  } catch (err) {
+    console.error('[QR] refundQRPayment error:', err);
+    return error(res, 'Failed to initiate refund.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// GET /api/qr/:restaurantSlug/order-status?qrOrderId=1 or ?qrOrderIds=1,2,3 — public order status polling
+async function getQRModelOrderStatus(req, res) {
+  try {
+    const { restaurantSlug } = req.params;
+    const { qrOrderId, qrOrderIds } = req.query;
+
+    // Support single ID (legacy) or comma-separated IDs
+    let ids = [];
+    if (qrOrderIds) {
+      ids = qrOrderIds.split(',').map(id => parseInt(id, 10)).filter(id => id > 0);
+    } else if (qrOrderId) {
+      ids = [parseInt(qrOrderId, 10)];
+    }
+    if (ids.length === 0) return error(res, 'qrOrderId or qrOrderIds is required.', HTTP_STATUS.BAD_REQUEST);
+
+    const [rRows] = await query('SELECT id FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
+    if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+
+    const placeholders = ids.map(() => '?').join(',');
+    const [rows] = await query(
+      `SELECT qo.id, qo.status, qo.order_type, qo.linked_order_id, qo.reject_reason, qo.payment_preference, qo.razorpay_payment_id, qo.refund_status, qo.created_at,
+              o.payment_status,
+              t.table_number, f.name AS floor_name
+       FROM qr_orders qo
+       LEFT JOIN orders o ON o.id = qo.linked_order_id
+       LEFT JOIN tables t ON t.id = qo.table_id
+       LEFT JOIN floors f ON f.id = t.floor_id
+       WHERE qo.id IN (${placeholders}) AND qo.restaurant_id = ?`,
+      [...ids, rRows[0].id]
+    );
+
+    // For single ID (legacy), return single object; for multiple, return array
+    if (!qrOrderIds && qrOrderId) {
+      return success(res, rows && rows.length > 0 ? rows[0] : null);
+    }
+    return success(res, rows || []);
+  } catch (err) {
+    console.error('[QR] getQRModelOrderStatus error:', err);
+    return error(res, 'Failed to get status.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   QR MODEL — STAFF ENDPOINTS (authenticated)
+   ════════════════════════════════════════════════════════════════════════════ */
+
+// GET /api/qr-orders/list — all QR orders for QR model restaurants
+async function getQRModelOrders(req, res) {
+  try {
+    const restaurantId = req.user.restaurantId;
+    const { status, orderType, paymentStatus, date, page = 1, limit = 50 } = req.query;
+    const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(limit);
+
+    let where = 'WHERE qo.restaurant_id = ?';
+    const params = [restaurantId];
+
+    if (status && status !== 'all') { where += ' AND qo.status = ?'; params.push(status); }
+    if (orderType && orderType !== 'all') { where += ' AND qo.order_type = ?'; params.push(orderType); }
+    if (date) { where += ' AND DATE(qo.created_at) = ?'; params.push(date); }
+
+    // Payment status filter requires JOIN on orders
+    let havingClause = '';
+    if (paymentStatus === 'paid') { havingClause = 'HAVING o.payment_status = \'paid\''; }
+    else if (paymentStatus === 'unpaid') { havingClause = 'HAVING (o.payment_status IS NULL OR o.payment_status != \'paid\')'; }
+
+    // For count query with payment filter, we need the join
+    const countSql = paymentStatus && paymentStatus !== 'all'
+      ? `SELECT COUNT(*) AS total FROM qr_orders qo LEFT JOIN orders o ON o.id = qo.linked_order_id ${where} ${havingClause.replace('HAVING', 'AND')}`
+      : `SELECT COUNT(*) AS total FROM qr_orders qo ${where}`;
+    const [[countRow]] = await query(countSql, params);
+
+    const [rows] = await query(
+      `SELECT qo.*, t.table_number, f.name AS floor_name,
+              o.order_number, o.payment_status, o.subtotal AS order_subtotal, o.tax_amount AS order_tax, o.total_amount AS order_total, o.tax_enabled AS linked_tax_enabled
+       FROM qr_orders qo
+       LEFT JOIN tables t ON t.id = qo.table_id
+       LEFT JOIN floors f ON f.id = t.floor_id
+       LEFT JOIN orders o ON o.id = qo.linked_order_id
+       ${where}
+       ${paymentStatus === 'paid' ? 'AND o.payment_status = \'paid\'' : ''}
+       ${paymentStatus === 'unpaid' ? 'AND (o.payment_status IS NULL OR o.payment_status != \'paid\')' : ''}
+       ORDER BY qo.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...params, parseInt(limit), offset]
+    );
+
+    return success(res, { orders: rows, total: countRow.total, page: parseInt(page), limit: parseInt(limit) });
+  } catch (err) {
+    console.error('[QR] getQRModelOrders error:', err);
+    return error(res, 'Failed to fetch orders.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// PATCH /api/qr-orders/:id/update-status — update QR order status (for QR model)
+async function updateQROrderStatus(req, res) {
+  try {
+    const { id } = req.params;
+    const { status: newStatus } = req.body;
+    const restaurantId = req.user.restaurantId;
+
+    const validStatuses = ['pending', 'accepted', 'rejected', 'fulfilled'];
+    if (!validStatuses.includes(newStatus)) return error(res, 'Invalid status.', HTTP_STATUS.BAD_REQUEST);
+
+    const [rows] = await query('SELECT * FROM qr_orders WHERE id = ? AND restaurant_id = ? LIMIT 1', [id, restaurantId]);
+    if (!rows || rows.length === 0) return error(res, 'Order not found.', HTTP_STATUS.NOT_FOUND);
+    const qrOrder = rows[0];
+
+    // If accepting, create the real order
+    if (newStatus === 'accepted' && qrOrder.status === 'pending') {
+      const items = typeof qrOrder.items === 'string' ? JSON.parse(qrOrder.items) : qrOrder.items;
+
+      const orderId = await transaction(async (conn) => {
+        const orderNumber = buildOrderNumber();
+        let floorId = null;
+        if (qrOrder.table_id) {
+          const [tbl] = await conn.execute('SELECT floor_id FROM tables WHERE id = ? LIMIT 1', [qrOrder.table_id]);
+          floorId = tbl[0]?.floor_id || null;
+        }
+
+        // If customer already paid online, mark linked order as paid
+        const isPrepaid = qrOrder.payment_preference === 'online' && qrOrder.razorpay_payment_id;
+        const [insertRes] = await conn.execute(
+          `INSERT INTO orders (restaurant_id, table_id, floor_id, order_number, order_type, status, customer_name, customer_phone, delivery_address, notes, payment_status, payment_mode)
+           VALUES (?, ?, ?, ?, ?, 'preparing', ?, ?, ?, ?, ?, ?)`,
+          [restaurantId, qrOrder.table_id || null, floorId, orderNumber, qrOrder.order_type || 'dine_in',
+            qrOrder.customer_name || null, qrOrder.customer_phone || null,
+            qrOrder.delivery_address || null, qrOrder.special_instructions || null,
+            isPrepaid ? 'paid' : 'unpaid', isPrepaid ? 'online' : null]
+        );
+        const newOrderId = insertRes.insertId;
+
+        // Add items
+        for (const item of items) {
+          const effectiveUnitPrice = item.itemPrice + (item.addonPerUnit || 0);
+          const totalPrice = effectiveUnitPrice * item.quantity;
+          const taxAmount = (totalPrice * (item.taxRate || 0)) / 100;
+          await conn.execute(
+            `INSERT INTO order_items (order_id, restaurant_id, menu_item_id, variant_id, item_name, item_price, quantity, tax_rate, tax_amount, total_price, notes, addon_details, addon_per_unit, kot_sent)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            [newOrderId, restaurantId, item.menuItemId, item.variantId || null, item.itemName,
+              item.itemPrice, item.quantity, item.taxRate || 0, taxAmount, totalPrice,
+              item.notes || null, item.addonDetails ? JSON.stringify(item.addonDetails) : null, item.addonPerUnit || 0]
+          );
+        }
+
+        await conn.execute("UPDATE orders SET kot_printed = 1 WHERE id = ?", [newOrderId]);
+        await recalcOrder(newOrderId, conn);
+
+        // Update QR order
+        await conn.execute("UPDATE qr_orders SET status = 'accepted', accepted_by = ?, linked_order_id = ? WHERE id = ?", [req.user.id, newOrderId, id]);
+
+        return newOrderId;
+      });
+
+      return success(res, { orderId }, 'Order accepted and sent to kitchen.');
+    }
+
+    // Reject
+    if (newStatus === 'rejected') {
+      if (qrOrder.status !== 'pending') return error(res, 'Only pending orders can be rejected.', HTTP_STATUS.BAD_REQUEST);
+      const { reason, initiateRefund: shouldRefund } = req.body;
+      let refundStatus = null;
+      if (qrOrder.razorpay_payment_id) {
+        // Prepaid order — track whether refund was initiated
+        if (shouldRefund) {
+          try {
+            await initiateRefund(restaurantId, qrOrder.razorpay_payment_id);
+            refundStatus = 'refunded';
+          } catch (refundErr) {
+            console.error('[QR] Auto-refund on reject failed:', refundErr);
+            refundStatus = 'not_refunded';
+            await query("UPDATE qr_orders SET status = 'rejected', reject_reason = ?, refund_status = ? WHERE id = ?", [reason || null, refundStatus, id]);
+            return success(res, null, 'Order rejected but refund failed. Please process refund manually.');
+          }
+        } else {
+          refundStatus = 'not_refunded';
+        }
+      }
+      await query("UPDATE qr_orders SET status = 'rejected', reject_reason = ?, refund_status = ? WHERE id = ?", [reason || null, refundStatus, id]);
+      return success(res, null, 'Order rejected.');
+    }
+
+    // Fulfill
+    if (newStatus === 'fulfilled') {
+      if (qrOrder.status !== 'accepted') return error(res, 'Only accepted orders can be fulfilled.', HTTP_STATUS.BAD_REQUEST);
+      await query("UPDATE qr_orders SET status = 'fulfilled' WHERE id = ?", [id]);
+      if (qrOrder.linked_order_id) {
+        await query("UPDATE orders SET status = 'completed', completed_at = NOW() WHERE id = ?", [qrOrder.linked_order_id]);
+      }
+      return success(res, null, 'Order marked as fulfilled.');
+    }
+
+    return error(res, 'Invalid status transition.', HTTP_STATUS.BAD_REQUEST);
+  } catch (err) {
+    console.error('[QR] updateQROrderStatus error:', err);
+    return error(res, 'Failed to update order status.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// PATCH /api/qr-orders/:id/payment — toggle payment status
+async function updateQROrderPayment(req, res) {
+  try {
+    const { id } = req.params;
+    const { paymentStatus } = req.body;
+    const restaurantId = req.user.restaurantId;
+
+    if (!['paid', 'unpaid'].includes(paymentStatus)) return error(res, 'Invalid payment status.', HTTP_STATUS.BAD_REQUEST);
+
+    const [rows] = await query('SELECT linked_order_id FROM qr_orders WHERE id = ? AND restaurant_id = ? LIMIT 1', [id, restaurantId]);
+    if (!rows || rows.length === 0) return error(res, 'Order not found.', HTTP_STATUS.NOT_FOUND);
+
+    if (rows[0].linked_order_id) {
+      await query('UPDATE orders SET payment_status = ?, payment_mode = COALESCE(payment_mode, ?) WHERE id = ?', [paymentStatus, paymentStatus === 'paid' ? 'cash' : null, rows[0].linked_order_id]);
+    }
+
+    return success(res, null, `Payment marked as ${paymentStatus}.`);
+  } catch (err) {
+    console.error('[QR] updateQROrderPayment error:', err);
+    return error(res, 'Failed to update payment.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// POST /api/qr/:restaurantSlug/send-otp — send WhatsApp OTP for phone verification
+async function sendPhoneOTP(req, res) {
+  try {
+    const { restaurantSlug } = req.params;
+    const { phone } = req.body;
+    if (!phone || phone.replace(/\D/g, '').length < 10) {
+      return error(res, 'Valid phone number is required.', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    // Look up restaurant and check WA token balance
+    const [rRows] = await query('SELECT id, wa_tokens FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
+    if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+    const restaurant = rRows[0];
+
+    if (!restaurant.wa_tokens || restaurant.wa_tokens < 1) {
+      return error(res, 'Insufficient WA messaging tokens. Please contact the restaurant.', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    await requestOTP(phone);
+
+    // Deduct 1 token
+    await query('UPDATE restaurants SET wa_tokens = wa_tokens - 1 WHERE id = ? AND wa_tokens > 0', [restaurant.id]);
+
+    // Notify restaurant owner if tokens just ran out
+    if (restaurant.wa_tokens === 1) {
+      // Was 1 before deduction, now 0
+      notifyRestaurantOwner(restaurant.id, 'warning', 'WA Tokens Exhausted', 'Your WhatsApp messaging tokens have run out. Phone verification for customers will be unavailable until tokens are recharged. Please contact support to recharge.');
+    }
+
+    return success(res, null, 'OTP sent to your WhatsApp.');
+  } catch (err) {
+    console.error('[QR] sendPhoneOTP error:', err);
+    return error(res, 'Failed to send OTP. Please try again.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+// POST /api/qr/:restaurantSlug/verify-otp — verify WhatsApp OTP
+async function verifyPhoneOTP(req, res) {
+  try {
+    const { phone, otp } = req.body;
+    if (!phone || !otp) return error(res, 'Phone and OTP are required.', HTTP_STATUS.BAD_REQUEST);
+    const valid = verifyOTP(phone, otp);
+    if (!valid) return error(res, 'Invalid or expired OTP.', HTTP_STATUS.BAD_REQUEST);
+    return success(res, { verified: true }, 'Phone verified.');
+  } catch (err) {
+    console.error('[QR] verifyPhoneOTP error:', err);
+    return error(res, 'Verification failed.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
 module.exports = {
-  // Public
+  // Public (POSS model — table-based with PIN)
   getTableInfo,
   verifyTablePin,
   validateSession,
   placeQROrder,
   getQROrderStatus,
-  // Staff
+  // Public (QR model — no PIN)
+  getQRRestaurantInfo,
+  getQRFloorsTables,
+  getQRTableInfo,
+  placeQRModelOrder,
+  getQRModelOrderStatus,
+  sendPhoneOTP,
+  verifyPhoneOTP,
+  createQRPayment,
+  verifyQRPayment,
+  refundQRPayment,
+  // Staff (POSS)
   getPendingQROrders,
   getMyPendingQROrders,
   acceptQROrder,
   rejectQROrder,
+  // Staff (QR model)
+  getQRModelOrders,
+  updateQROrderStatus,
+  updateQROrderPayment,
   // Table QR management
   generateTableQR,
   resetTableSession,

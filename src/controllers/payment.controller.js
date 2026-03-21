@@ -8,42 +8,60 @@ const { encrypt, decrypt } = require('../utils/encryption');
 /* ─── gateway settings ─────────────────────────────────────────────────────── */
 
 async function getGatewaySettings(req, res) {
-  // Schema column: `gateway` (not gateway_name); keys stored encrypted separately
   const [rows] = await query(
-    'SELECT id, gateway, is_active, is_test_mode, updated_at FROM payment_gateway_settings WHERE restaurant_id = ?',
+    'SELECT id, gateway, api_key_encrypted, api_secret_encrypted, is_active, is_test_mode, updated_at FROM payment_gateway_settings WHERE restaurant_id = ?',
     [req.user.restaurantId]
   );
-  // Return with frontend-compatible field name
-  const mapped = rows.map(r => ({ ...r, gateway_name: r.gateway }));
+  // Return masked key hints (last 4 chars) so staff can see credentials are configured
+  const mapped = rows.map(r => {
+    let maskedKey = '', maskedSecret = '';
+    try {
+      if (r.api_key_encrypted) {
+        const raw = decrypt(r.api_key_encrypted);
+        maskedKey = '•••••' + raw.slice(-4);
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      if (r.api_secret_encrypted) {
+        const raw = decrypt(r.api_secret_encrypted);
+        maskedSecret = '•••••' + raw.slice(-4);
+      }
+    } catch (e) { /* ignore */ }
+    return { id: r.id, gateway: r.gateway, gateway_name: r.gateway, is_active: r.is_active, updated_at: r.updated_at, maskedKey, maskedSecret };
+  });
   return success(res, mapped);
 }
 
 async function saveGatewaySettings(req, res) {
-  const { gatewayName, apiKey, apiSecret, webhookSecret, isActive, isTestMode } = req.body;
-  if (!gatewayName || !apiKey) return error(res, 'gatewayName and apiKey are required.', HTTP_STATUS.BAD_REQUEST);
+  const { gatewayName, apiKey, apiSecret } = req.body;
+  if (!gatewayName) return error(res, 'gatewayName is required.', HTTP_STATUS.BAD_REQUEST);
 
-  const encApiKey = encrypt(apiKey);
-  const encApiSecret = apiSecret ? encrypt(apiSecret) : null;
-  const encWebhook = webhookSecret ? encrypt(webhookSecret) : null;
+  // Deactivate any other gateways for this restaurant (only one gateway active at a time)
+  await query(
+    'UPDATE payment_gateway_settings SET is_active = 0 WHERE restaurant_id = ? AND gateway != ?',
+    [req.user.restaurantId, gatewayName]
+  );
 
-  // Schema uses `gateway` column (ENUM), and `api_key_encrypted`, `api_secret_encrypted`, `webhook_secret_encrypted`
   const [existing] = await query(
     'SELECT id FROM payment_gateway_settings WHERE restaurant_id = ? AND gateway = ? LIMIT 1',
     [req.user.restaurantId, gatewayName]
   );
 
   if (existing && existing.length > 0) {
-    await query(
-      `UPDATE payment_gateway_settings
-       SET api_key_encrypted = ?, api_secret_encrypted = ?, webhook_secret_encrypted = ?, is_active = ?, is_test_mode = ?
-       WHERE id = ?`,
-      [encApiKey, encApiSecret, encWebhook, isActive ? 1 : 0, isTestMode ? 1 : 0, existing[0].id]
-    );
+    // Update — only overwrite keys if new values are provided
+    const sets = ['is_active = 1', 'is_test_mode = 0'];
+    const params = [];
+    if (apiKey) { sets.push('api_key_encrypted = ?'); params.push(encrypt(apiKey)); }
+    if (apiSecret) { sets.push('api_secret_encrypted = ?'); params.push(encrypt(apiSecret)); }
+    params.push(existing[0].id);
+    await query(`UPDATE payment_gateway_settings SET ${sets.join(', ')} WHERE id = ?`, params);
   } else {
+    if (!apiKey) return error(res, 'API Key is required for new gateway setup.', HTTP_STATUS.BAD_REQUEST);
+    if (!apiSecret) return error(res, 'API Secret is required for new gateway setup.', HTTP_STATUS.BAD_REQUEST);
     await query(
-      `INSERT INTO payment_gateway_settings (restaurant_id, gateway, api_key_encrypted, api_secret_encrypted, webhook_secret_encrypted, is_active, is_test_mode)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [req.user.restaurantId, gatewayName, encApiKey, encApiSecret, encWebhook, isActive ? 1 : 0, isTestMode ? 1 : 0]
+      `INSERT INTO payment_gateway_settings (restaurant_id, gateway, api_key_encrypted, api_secret_encrypted, is_active, is_test_mode)
+       VALUES (?, ?, ?, ?, 1, 0)`,
+      [req.user.restaurantId, gatewayName, encrypt(apiKey), encrypt(apiSecret)]
     );
   }
 
@@ -161,7 +179,7 @@ async function createInstamojoPaymentLink(req, res) {
   if (!gwRows || gwRows.length === 0) return error(res, 'Instamojo not configured.', HTTP_STATUS.BAD_REQUEST);
 
   const gw = gwRows[0];
-  const baseUrl = gw.is_test_mode ? 'https://test.instamojo.com/api/1.1' : 'https://www.instamojo.com/api/1.1';
+  const baseUrl = 'https://www.instamojo.com/api/1.1';
   const axios = require('axios');
 
   const response = await axios.post(

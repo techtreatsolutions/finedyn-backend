@@ -177,7 +177,7 @@ async function resetStaffPassword(req, res) {
   if (!rows || rows.length === 0) return error(res, 'User not found.', HTTP_STATUS.NOT_FOUND);
 
   const hash = await bcrypt.hash(newPassword, 12);
-  await query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, userId]);
+  await query('UPDATE users SET password_hash = ? WHERE id = ? AND restaurant_id = ?', [hash, userId, req.user.restaurantId]);
   return success(res, null, 'Password reset.');
 }
 
@@ -206,4 +206,28 @@ async function updateBillFormatSettings(req, res) {
   return success(res, null, 'Bill format settings updated.');
 }
 
-module.exports = { getRestaurantProfile, updateRestaurantProfile, getSubscriptionInfo, getDashboardStats, getUsers, createUser, updateUser, deleteUser, resetStaffPassword, getBillFormatSettings, updateBillFormatSettings };
+async function getWAMessagingSettings(req, res) {
+  const [rows] = await query(
+    'SELECT wa_messaging_mode, google_review_url, wa_tokens FROM restaurants WHERE id = ? LIMIT 1',
+    [req.user.restaurantId]
+  );
+  if (!rows || rows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+  return success(res, rows[0]);
+}
+
+async function updateWAMessagingSettings(req, res) {
+  const { wa_messaging_mode, google_review_url } = req.body;
+  if (![1, 2, 3].includes(Number(wa_messaging_mode))) {
+    return error(res, 'Invalid WA messaging mode.', HTTP_STATUS.BAD_REQUEST);
+  }
+  if (Number(wa_messaging_mode) > 1 && !google_review_url?.trim()) {
+    return error(res, 'Google Maps Review URL is required for this mode.', HTTP_STATUS.BAD_REQUEST);
+  }
+  await query(
+    'UPDATE restaurants SET wa_messaging_mode = ?, google_review_url = ? WHERE id = ?',
+    [Number(wa_messaging_mode), google_review_url?.trim() || null, req.user.restaurantId]
+  );
+  return success(res, null, 'WA messaging settings updated.');
+}
+
+module.exports = { getRestaurantProfile, updateRestaurantProfile, getSubscriptionInfo, getDashboardStats, getUsers, createUser, updateUser, deleteUser, resetStaffPassword, getBillFormatSettings, updateBillFormatSettings, getWAMessagingSettings, updateWAMessagingSettings };

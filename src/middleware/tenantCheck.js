@@ -7,6 +7,10 @@ function tenantCheck(req, res, next) {
   if (!req.user) return error(res, 'Unauthorized.', HTTP_STATUS.UNAUTHORIZED);
   if (req.user.role === ROLES.SUPER_ADMIN) return next();
 
+  if (!req.user.restaurantId) {
+    return error(res, 'Access denied. No restaurant associated with your account.', HTTP_STATUS.FORBIDDEN);
+  }
+
   const targetRestaurantId = req.params.restaurantId || req.body.restaurantId || req.query.restaurantId || null;
   if (targetRestaurantId === null) return next();
 

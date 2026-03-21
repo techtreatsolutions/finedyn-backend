@@ -3,6 +3,7 @@
 const { query, transaction } = require('../config/database');
 const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS } = require('../config/constants');
+const { sanitizePagination } = require('../utils/validate');
 
 /* ─── categories ───────────────────────────────────────────────────────────── */
 
@@ -38,9 +39,8 @@ async function deleteCategory(req, res) {
 /* ─── expenses ─────────────────────────────────────────────────────────────── */
 
 async function getExpenses(req, res) {
-  const { page, limit, categoryId, status, startDate, endDate } = req.query;
-  const parsedPage = parseInt(page, 10) || 1;
-  const parsedLimit = parseInt(limit, 10) || 20;
+  const { categoryId, status, startDate, endDate } = req.query;
+  const { page: parsedPage, limit: parsedLimit } = sanitizePagination(req.query);
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE e.restaurant_id = ?';

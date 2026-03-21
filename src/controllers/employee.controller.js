@@ -3,6 +3,7 @@
 const { query, transaction } = require('../config/database');
 const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS } = require('../config/constants');
+const { isNonNegativeNumber } = require('../utils/validate');
 
 /* ─── employees ────────────────────────────────────────────────────────────── */
 
@@ -165,6 +166,9 @@ async function processSalary(req, res) {
   const { employeeId } = req.params;
   const { month, year, basicSalary, bonuses, deductions, adjustAdvances, adjustOutstanding, paymentDate, notes } = req.body;
   if (!month || !year || !basicSalary) return error(res, 'month, year and basicSalary are required.', HTTP_STATUS.BAD_REQUEST);
+  if (!isNonNegativeNumber(basicSalary)) return error(res, 'basicSalary must be a non-negative number.', HTTP_STATUS.BAD_REQUEST);
+  if (bonuses !== undefined && bonuses !== null && !isNonNegativeNumber(bonuses)) return error(res, 'bonuses must be a non-negative number.', HTTP_STATUS.BAD_REQUEST);
+  if (deductions !== undefined && deductions !== null && !isNonNegativeNumber(deductions)) return error(res, 'deductions must be a non-negative number.', HTTP_STATUS.BAD_REQUEST);
 
   const [empRows] = await query('SELECT id FROM employees WHERE id = ? AND restaurant_id = ? LIMIT 1', [employeeId, req.user.restaurantId]);
   if (!empRows || empRows.length === 0) return error(res, 'Employee not found.', HTTP_STATUS.NOT_FOUND);
@@ -255,7 +259,7 @@ async function deleteSalary(req, res) {
   const { employeeId, salaryId } = req.params;
   const [rows] = await query('SELECT id FROM salary_records WHERE id = ? AND employee_id = ? AND restaurant_id = ? LIMIT 1', [salaryId, employeeId, req.user.restaurantId]);
   if (!rows || rows.length === 0) return error(res, 'Salary record not found.', HTTP_STATUS.NOT_FOUND);
-  await query('DELETE FROM salary_records WHERE id = ?', [salaryId]);
+  await query('DELETE FROM salary_records WHERE id = ? AND employee_id = ? AND restaurant_id = ?', [salaryId, employeeId, req.user.restaurantId]);
   return success(res, null, 'Salary record deleted.');
 }
 
@@ -344,7 +348,7 @@ async function deleteAdvance(req, res) {
   if (!rows || rows.length === 0) return error(res, 'Record not found.', HTTP_STATUS.NOT_FOUND);
   if (rows[0].status === 'adjusted') return error(res, 'Cannot delete an adjusted advance.', HTTP_STATUS.BAD_REQUEST);
 
-  await query('DELETE FROM employee_advances WHERE id = ?', [advanceId]);
+  await query('DELETE FROM employee_advances WHERE id = ? AND restaurant_id = ?', [advanceId, req.user.restaurantId]);
   return success(res, null, 'Record deleted.');
 }
 

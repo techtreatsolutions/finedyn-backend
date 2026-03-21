@@ -1,14 +1,8 @@
 -- ============================================================
 -- FineDyn - Multi-Tenant Restaurant SaaS POS Platform
--- Database Schema v1.0
+-- Database Schema v2.0 (Production-Ready)
+-- Includes: FK constraints, indexes, merged patches
 -- ============================================================
-
-
-
-
-
-
-
 
 -- ============================================================
 -- 1. PLANS - SaaS subscription plans
@@ -37,9 +31,10 @@ CREATE TABLE IF NOT EXISTS `plans` (
   `feature_analytics` TINYINT(1) NOT NULL DEFAULT 1,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `is_default` TINYINT(1) NOT NULL DEFAULT 0,
+  `target_type` VARCHAR(20) DEFAULT NULL COMMENT 'poss or qr — NULL means universal',
   `sort_order` INT NOT NULL DEFAULT 0,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -49,7 +44,7 @@ CREATE TABLE IF NOT EXISTS `restaurants` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `name` VARCHAR(255) NOT NULL,
   `slug` VARCHAR(100) NOT NULL UNIQUE,
-  `type` VARCHAR(50) NOT NULL DEFAULT 'dine_in',
+  `type` VARCHAR(50) NOT NULL DEFAULT 'poss',
   `email` VARCHAR(255) UNIQUE,
   `phone` VARCHAR(20),
   `address` TEXT,
@@ -67,11 +62,20 @@ CREATE TABLE IF NOT EXISTS `restaurants` (
   `subscription_end` DATETIME,
   `bill_prefix` VARCHAR(10) NOT NULL DEFAULT 'INV',
   `bill_counter` INT NOT NULL DEFAULT 0,
+  `wa_tokens` DECIMAL(10,1) NOT NULL DEFAULT 0,
+  `wa_messaging_mode` TINYINT NOT NULL DEFAULT 1 COMMENT '1=ebill only, 2=ebill+review same msg, 3=ebill+review separate msgs',
+  `google_review_url` VARCHAR(500),
   `queued_plan_id` INT,
   `queued_plan_months` INT NOT NULL DEFAULT 1,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_restaurants_plan_id` (`plan_id`),
+  INDEX `idx_restaurants_is_active` (`is_active`),
+  INDEX `idx_restaurants_type` (`type`),
+  INDEX `idx_restaurants_subscription_status` (`subscription_status`),
+  CONSTRAINT `fk_restaurants_plan` FOREIGN KEY (`plan_id`) REFERENCES `plans`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_restaurants_queued_plan` FOREIGN KEY (`queued_plan_id`) REFERENCES `plans`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -85,7 +89,10 @@ CREATE TABLE IF NOT EXISTS `feature_overrides` (
   `reason` TEXT,
   `overridden_by` INT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_feature_overrides_restaurant` (`restaurant_id`),
+  UNIQUE KEY `uq_feature_override` (`restaurant_id`, `feature_name`),
+  CONSTRAINT `fk_feature_overrides_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -98,7 +105,7 @@ CREATE TABLE IF NOT EXISTS `users` (
   `email` VARCHAR(255) NOT NULL UNIQUE,
   `phone` VARCHAR(20),
   `password_hash` VARCHAR(255) NOT NULL,
-  `role` VARCHAR(50) NOT NULL,
+  `role` ENUM('super_admin','owner','manager','cashier','waiter','kitchen_staff') NOT NULL,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `is_verified` TINYINT(1) NOT NULL DEFAULT 0,
   `email_verification_token` VARCHAR(255),
@@ -110,11 +117,16 @@ CREATE TABLE IF NOT EXISTS `users` (
   `section_access` TEXT,
   `active_session_id` VARCHAR(64) NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_users_restaurant` (`restaurant_id`),
+  INDEX `idx_users_role` (`role`),
+  INDEX `idx_users_is_active` (`is_active`),
+  INDEX `idx_users_email_active` (`email`, `is_active`),
+  CONSTRAINT `fk_users_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 5. FLOORS - Restaurant floors/areas (dine-in)
+-- 5. FLOORS - Restaurant floors/areas
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `floors` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -124,7 +136,9 @@ CREATE TABLE IF NOT EXISTS `floors` (
   `sort_order` INT NOT NULL DEFAULT 0,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_floors_restaurant` (`restaurant_id`),
+  CONSTRAINT `fk_floors_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -144,7 +158,13 @@ CREATE TABLE IF NOT EXISTS `tables` (
   `table_pin` VARCHAR(20),
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_tables_restaurant` (`restaurant_id`),
+  INDEX `idx_tables_floor` (`floor_id`),
+  INDEX `idx_tables_status` (`status`),
+  INDEX `idx_tables_restaurant_floor` (`restaurant_id`, `floor_id`),
+  CONSTRAINT `fk_tables_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_tables_floor` FOREIGN KEY (`floor_id`) REFERENCES `floors`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -161,7 +181,9 @@ CREATE TABLE IF NOT EXISTS `menu_categories` (
   `available_from` TIME DEFAULT NULL,
   `available_to` TIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_menu_categories_restaurant` (`restaurant_id`),
+  CONSTRAINT `fk_menu_categories_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -185,7 +207,12 @@ CREATE TABLE IF NOT EXISTS `menu_items` (
   `available_from` TIME DEFAULT NULL,
   `available_to` TIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_menu_items_restaurant` (`restaurant_id`),
+  INDEX `idx_menu_items_category` (`category_id`),
+  INDEX `idx_menu_items_available` (`restaurant_id`, `is_available`),
+  CONSTRAINT `fk_menu_items_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_menu_items_category` FOREIGN KEY (`category_id`) REFERENCES `menu_categories`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -197,7 +224,9 @@ CREATE TABLE IF NOT EXISTS `menu_item_variants` (
   `name` VARCHAR(100) NOT NULL,
   `price` DECIMAL(10,2) NOT NULL,
   `is_available` TINYINT(1) NOT NULL DEFAULT 1,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_variants_item` (`menu_item_id`),
+  CONSTRAINT `fk_variants_item` FOREIGN KEY (`menu_item_id`) REFERENCES `menu_items`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -209,7 +238,9 @@ CREATE TABLE IF NOT EXISTS `menu_item_addons` (
   `name` VARCHAR(100) NOT NULL,
   `price` DECIMAL(10,2) NOT NULL DEFAULT 0,
   `is_available` TINYINT(1) NOT NULL DEFAULT 1,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_addons_item` (`menu_item_id`),
+  CONSTRAINT `fk_addons_item` FOREIGN KEY (`menu_item_id`) REFERENCES `menu_items`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -240,9 +271,23 @@ CREATE TABLE IF NOT EXISTS `orders` (
   `bill_number` VARCHAR(50),
   `billed_at` DATETIME,
   `tax_enabled` TINYINT(1) NOT NULL DEFAULT 1,
+  `ebill_token` VARCHAR(64),
   `completed_at` DATETIME,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_orders_restaurant` (`restaurant_id`),
+  INDEX `idx_orders_table` (`table_id`),
+  INDEX `idx_orders_status` (`status`),
+  INDEX `idx_orders_payment_status` (`payment_status`),
+  INDEX `idx_orders_created` (`restaurant_id`, `created_at`),
+  INDEX `idx_orders_restaurant_status` (`restaurant_id`, `status`),
+  INDEX `idx_orders_ebill_token` (`ebill_token`),
+  INDEX `idx_orders_bill_number` (`restaurant_id`, `bill_number`),
+  CONSTRAINT `fk_orders_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_orders_table` FOREIGN KEY (`table_id`) REFERENCES `tables`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_orders_floor` FOREIGN KEY (`floor_id`) REFERENCES `floors`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_orders_waiter` FOREIGN KEY (`waiter_id`) REFERENCES `users`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_orders_cashier` FOREIGN KEY (`cashier_id`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -267,7 +312,12 @@ CREATE TABLE IF NOT EXISTS `order_items` (
   `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
   `kot_sent` TINYINT(1) NOT NULL DEFAULT 0,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_order_items_order` (`order_id`),
+  INDEX `idx_order_items_restaurant` (`restaurant_id`),
+  INDEX `idx_order_items_status` (`status`),
+  CONSTRAINT `fk_order_items_order` FOREIGN KEY (`order_id`) REFERENCES `orders`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_order_items_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -282,7 +332,11 @@ CREATE TABLE IF NOT EXISTS `bill_adjustments` (
   `value_type` VARCHAR(50) NOT NULL DEFAULT 'fixed',
   `value` DECIMAL(10,2) NOT NULL,
   `applied_amount` DECIMAL(10,2) NOT NULL DEFAULT 0,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_bill_adj_order` (`order_id`),
+  INDEX `idx_bill_adj_restaurant` (`restaurant_id`),
+  CONSTRAINT `fk_bill_adj_order` FOREIGN KEY (`order_id`) REFERENCES `orders`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_bill_adj_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -303,7 +357,13 @@ CREATE TABLE IF NOT EXISTS `payments` (
   `processed_by` INT,
   `notes` TEXT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_payments_order` (`order_id`),
+  INDEX `idx_payments_restaurant` (`restaurant_id`),
+  INDEX `idx_payments_status` (`status`),
+  CONSTRAINT `fk_payments_order` FOREIGN KEY (`order_id`) REFERENCES `orders`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_payments_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_payments_processed_by` FOREIGN KEY (`processed_by`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -319,7 +379,9 @@ CREATE TABLE IF NOT EXISTS `payment_gateway_settings` (
   `is_active` TINYINT(1) NOT NULL DEFAULT 0,
   `is_test_mode` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY `uq_gateway_restaurant` (`restaurant_id`, `gateway`),
+  CONSTRAINT `fk_gateway_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -345,7 +407,15 @@ CREATE TABLE IF NOT EXISTS `reservations` (
   `advance_payment_mode` VARCHAR(50) DEFAULT NULL,
   `created_by` INT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_reservations_restaurant` (`restaurant_id`),
+  INDEX `idx_reservations_date` (`restaurant_id`, `reservation_date`),
+  INDEX `idx_reservations_status` (`status`),
+  INDEX `idx_reservations_table` (`table_id`),
+  CONSTRAINT `fk_reservations_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_reservations_table` FOREIGN KEY (`table_id`) REFERENCES `tables`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_reservations_floor` FOREIGN KEY (`floor_id`) REFERENCES `floors`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_reservations_created_by` FOREIGN KEY (`created_by`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -356,7 +426,9 @@ CREATE TABLE IF NOT EXISTS `inventory_categories` (
   `restaurant_id` INT NOT NULL,
   `name` VARCHAR(100) NOT NULL,
   `unit` VARCHAR(50) NOT NULL DEFAULT 'pcs',
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_inv_cat_restaurant` (`restaurant_id`),
+  CONSTRAINT `fk_inv_cat_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -378,7 +450,11 @@ CREATE TABLE IF NOT EXISTS `inventory_items` (
   `supplier_phone` VARCHAR(20),
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_inv_items_restaurant` (`restaurant_id`),
+  INDEX `idx_inv_items_category` (`category_id`),
+  CONSTRAINT `fk_inv_items_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_inv_items_category` FOREIGN KEY (`category_id`) REFERENCES `inventory_categories`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -397,7 +473,13 @@ CREATE TABLE IF NOT EXISTS `inventory_transactions` (
   `notes` TEXT,
   `reference_number` VARCHAR(100),
   `performed_by` INT,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_inv_txn_restaurant` (`restaurant_id`),
+  INDEX `idx_inv_txn_item` (`item_id`),
+  INDEX `idx_inv_txn_created` (`restaurant_id`, `created_at`),
+  CONSTRAINT `fk_inv_txn_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_inv_txn_item` FOREIGN KEY (`item_id`) REFERENCES `inventory_items`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_inv_txn_performed_by` FOREIGN KEY (`performed_by`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -421,7 +503,10 @@ CREATE TABLE IF NOT EXISTS `stock_requirement_tickets` (
   `resolved_by` INT,
   `resolved_at` DATETIME,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_stock_tickets_restaurant` (`restaurant_id`),
+  INDEX `idx_stock_tickets_status` (`status`),
+  CONSTRAINT `fk_stock_tickets_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -431,11 +516,13 @@ CREATE TABLE IF NOT EXISTS `expense_categories` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `restaurant_id` INT NOT NULL,
   `name` VARCHAR(100) NOT NULL,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_exp_cat_restaurant` (`restaurant_id`),
+  CONSTRAINT `fk_exp_cat_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 21. EXPENSES - Bills payable
+-- 21. EXPENSES
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `expenses` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -457,7 +544,14 @@ CREATE TABLE IF NOT EXISTS `expenses` (
   `receipt_url` VARCHAR(500),
   `recorded_by` INT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_expenses_restaurant` (`restaurant_id`),
+  INDEX `idx_expenses_category` (`category_id`),
+  INDEX `idx_expenses_status` (`status`),
+  INDEX `idx_expenses_date` (`restaurant_id`, `expense_date`),
+  CONSTRAINT `fk_expenses_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_expenses_category` FOREIGN KEY (`category_id`) REFERENCES `expense_categories`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_expenses_created_by` FOREIGN KEY (`created_by`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -484,7 +578,11 @@ CREATE TABLE IF NOT EXISTS `employees` (
   `designation` VARCHAR(100),
   `base_salary` DECIMAL(10,2) NOT NULL DEFAULT 0,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_employees_restaurant` (`restaurant_id`),
+  INDEX `idx_employees_user` (`user_id`),
+  CONSTRAINT `fk_employees_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_employees_user` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -511,7 +609,12 @@ CREATE TABLE IF NOT EXISTS `salary_records` (
   `paid_by` INT,
   `created_by` INT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_salary_restaurant` (`restaurant_id`),
+  INDEX `idx_salary_employee` (`employee_id`),
+  UNIQUE KEY `uq_salary_employee_period` (`employee_id`, `month`, `year`),
+  CONSTRAINT `fk_salary_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_salary_employee` FOREIGN KEY (`employee_id`) REFERENCES `employees`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -526,7 +629,12 @@ CREATE TABLE IF NOT EXISTS `attendance_records` (
   `check_in` TIME,
   `check_out` TIME,
   `notes` TEXT,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_attendance_restaurant` (`restaurant_id`),
+  INDEX `idx_attendance_employee` (`employee_id`),
+  UNIQUE KEY `uq_attendance_employee_date` (`employee_id`, `attendance_date`),
+  CONSTRAINT `fk_attendance_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_attendance_employee` FOREIGN KEY (`employee_id`) REFERENCES `employees`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -554,11 +662,12 @@ CREATE TABLE IF NOT EXISTS `bill_format_settings` (
   `bill_printer_size_mm` INT NOT NULL DEFAULT 80,
   `kot_printer_size_mm` INT NOT NULL DEFAULT 80,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT `fk_bill_format_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 26. SUBSCRIPTION PAYMENTS - Manual cash subscription renewals
+-- 26. SUBSCRIPTION PAYMENTS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `subscription_payments` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -571,7 +680,11 @@ CREATE TABLE IF NOT EXISTS `subscription_payments` (
   `subscription_start` DATETIME NOT NULL,
   `subscription_end` DATETIME NOT NULL,
   `processed_by` INT,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_sub_payments_restaurant` (`restaurant_id`),
+  CONSTRAINT `fk_sub_payments_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_sub_payments_plan` FOREIGN KEY (`plan_id`) REFERENCES `plans`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_sub_payments_processed_by` FOREIGN KEY (`processed_by`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -587,7 +700,11 @@ CREATE TABLE IF NOT EXISTS `audit_logs` (
   `old_value` JSON,
   `new_value` JSON,
   `ip_address` VARCHAR(50),
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_audit_restaurant` (`restaurant_id`),
+  INDEX `idx_audit_user` (`user_id`),
+  INDEX `idx_audit_created` (`created_at`),
+  INDEX `idx_audit_entity` (`entity_type`, `entity_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -602,22 +719,13 @@ CREATE TABLE IF NOT EXISTS `notifications` (
   `message` TEXT,
   `action_url` VARCHAR(500),
   `is_read` TINYINT(1) NOT NULL DEFAULT 0,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_notifications_user` (`user_id`),
+  INDEX `idx_notifications_restaurant` (`restaurant_id`),
+  INDEX `idx_notifications_unread` (`user_id`, `is_read`),
+  CONSTRAINT `fk_notifications_user` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_notifications_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-
--- ============================================================
--- DEFAULT DATA
--- ============================================================
-
--- Insert default plans
-INSERT INTO `plans` (`id`, `name`, `description`, `price_monthly`, `price_yearly`, `max_floors`, `max_tables`, `max_menu_items`, `max_staff`, `max_bills_per_day`, `max_bills_per_month`, `feature_waiter_app`, `feature_online_ordering`, `feature_reservations`, `feature_inventory`, `feature_expense_management`, `feature_employee_management`, `feature_kds`, `feature_analytics`, `is_active`, `is_default`, `sort_order`)
-VALUES
-  (1, 'Basic', 'Perfect for small QSR restaurants just getting started.', 999.00, 9990.00, 1, 10, 50, 5, 100, 2500, false, true, false, false, true, false, false, false, true, true, 1),
-  (2, 'Professional', 'Ideal for growing dine-in restaurants with full features.', 2499.00, 24990.00, 3, 30, 200, 15, 500, 12000, true, true, true, true, true, true, true, true, true, false, 2),
-  (3, 'Enterprise', 'For large restaurants and chains with unlimited usage.', 4999.00, 49990.00, 10, 100, 1000, 50, 2000, 50000, true, true, true, true, true, true, true, true, true, false, 3)
-ON DUPLICATE KEY UPDATE `updated_at` = CURRENT_TIMESTAMP;
 
 -- ============================================================
 -- 29. QR ORDERS
@@ -625,19 +733,31 @@ ON DUPLICATE KEY UPDATE `updated_at` = CURRENT_TIMESTAMP;
 CREATE TABLE IF NOT EXISTS `qr_orders` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `restaurant_id` INT NOT NULL,
-  `table_id` INT NOT NULL,
-  `session_token` VARCHAR(255) NOT NULL,
+  `table_id` INT,
+  `order_type` VARCHAR(50) NOT NULL DEFAULT 'dine_in',
+  `session_token` VARCHAR(255),
   `customer_name` VARCHAR(255),
   `customer_phone` VARCHAR(20),
+  `delivery_address` TEXT,
   `items` JSON NOT NULL,
   `special_instructions` TEXT,
   `payment_preference` VARCHAR(50),
+  `razorpay_order_id` VARCHAR(255),
+  `razorpay_payment_id` VARCHAR(255),
+  `refund_status` VARCHAR(20) NULL,
+  `tax_enabled` TINYINT(1) NOT NULL DEFAULT 1,
   `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
   `reject_reason` TEXT,
   `linked_order_id` INT,
   `accepted_by` INT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_qr_orders_restaurant` (`restaurant_id`),
+  INDEX `idx_qr_orders_status` (`status`),
+  INDEX `idx_qr_orders_table` (`table_id`),
+  INDEX `idx_qr_orders_created` (`restaurant_id`, `created_at`),
+  CONSTRAINT `fk_qr_orders_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_qr_orders_table` FOREIGN KEY (`table_id`) REFERENCES `tables`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -650,11 +770,79 @@ CREATE TABLE IF NOT EXISTS `qr_sessions` (
   `session_token` VARCHAR(255) NOT NULL,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_qr_sessions_restaurant` (`restaurant_id`),
+  INDEX `idx_qr_sessions_table` (`table_id`),
+  INDEX `idx_qr_sessions_token` (`session_token`),
+  CONSTRAINT `fk_qr_sessions_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_qr_sessions_table` FOREIGN KEY (`table_id`) REFERENCES `tables`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 31. EMPLOYEE ADVANCES
+-- 31. QR SETTINGS
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `qr_settings` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `restaurant_id` INT NOT NULL UNIQUE,
+  `enable_dine_in` TINYINT(1) NOT NULL DEFAULT 1,
+  `enable_takeaway` TINYINT(1) NOT NULL DEFAULT 1,
+  `enable_delivery` TINYINT(1) NOT NULL DEFAULT 0,
+  `payment_acceptance` VARCHAR(50) NOT NULL DEFAULT 'both',
+  `enable_tax` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT `fk_qr_settings_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 32. DEMO REQUESTS
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `demo_requests` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `first_name` VARCHAR(100) NOT NULL,
+  `last_name` VARCHAR(100),
+  `email` VARCHAR(255) NOT NULL,
+  `restaurant_name` VARCHAR(255),
+  `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_demo_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 33. SUPPORT REQUESTS
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `support_requests` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `name` VARCHAR(255) NOT NULL,
+  `email` VARCHAR(255) NOT NULL,
+  `subject` VARCHAR(255) NOT NULL,
+  `message` TEXT NOT NULL,
+  `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_support_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 34. WA TOKEN HISTORY
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `wa_token_history` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `restaurant_id` INT NOT NULL,
+  `action` VARCHAR(50) NOT NULL COMMENT 'recharge or deduct',
+  `amount` DECIMAL(10,1) NOT NULL,
+  `balance_after` DECIMAL(10,1) NOT NULL,
+  `performed_by` INT,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_wa_history_restaurant` (`restaurant_id`),
+  INDEX `idx_wa_history_created` (`restaurant_id`, `created_at`),
+  CONSTRAINT `fk_wa_history_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_wa_history_performed_by` FOREIGN KEY (`performed_by`) REFERENCES `users`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 35. EMPLOYEE ADVANCES
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `employee_advances` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -669,6 +857,20 @@ CREATE TABLE IF NOT EXISTS `employee_advances` (
   `adjusted_in_salary_id` INT,
   `created_by` INT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_advances_restaurant` (`restaurant_id`),
+  INDEX `idx_advances_employee` (`employee_id`),
+  CONSTRAINT `fk_advances_restaurant` FOREIGN KEY (`restaurant_id`) REFERENCES `restaurants`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_advances_employee` FOREIGN KEY (`employee_id`) REFERENCES `employees`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ============================================================
+-- DEFAULT DATA
+-- ============================================================
+INSERT INTO `plans` (`id`, `name`, `description`, `price_monthly`, `price_yearly`, `max_floors`, `max_tables`, `max_menu_items`, `max_staff`, `max_bills_per_day`, `max_bills_per_month`, `feature_waiter_app`, `feature_online_ordering`, `feature_reservations`, `feature_inventory`, `feature_expense_management`, `feature_employee_management`, `feature_kds`, `feature_analytics`, `is_active`, `is_default`, `target_type`, `sort_order`)
+VALUES
+  (1, 'Basic', 'Perfect for small QSR restaurants just getting started.', 999.00, 9990.00, 1, 10, 50, 5, 100, 2500, false, true, false, false, true, false, false, false, true, true, 'poss', 1),
+  (2, 'Professional', 'Ideal for growing dine-in restaurants with full features.', 2499.00, 24990.00, 3, 30, 200, 15, 500, 12000, true, true, true, true, true, true, true, true, true, false, 'poss', 2),
+  (3, 'Enterprise', 'For large restaurants and chains with unlimited usage.', 4999.00, 49990.00, 10, 100, 1000, 50, 2000, 50000, true, true, true, true, true, true, true, true, true, false, 'poss', 3),
+  (4, 'QR Ordering', 'QR-based ordering for dine-in, takeaway and delivery.', 499.00, 4990.00, 2, 20, 200, 3, 500, 10000, false, true, false, false, false, false, true, false, true, true, 'qr', 4)
+ON DUPLICATE KEY UPDATE `updated_at` = CURRENT_TIMESTAMP;

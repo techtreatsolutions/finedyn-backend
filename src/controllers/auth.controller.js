@@ -8,6 +8,7 @@ const { HTTP_STATUS, ROLES } = require('../config/constants');
 const crypto = require('crypto');
 const { sendPasswordReset, sendWelcome } = require('../utils/email');
 const { notifySuperAdmins } = require('./notification.controller');
+const { isValidEmail } = require('../utils/validate');
 
 async function login(req, res) {
   const { email, password } = req.body;
@@ -28,7 +29,10 @@ async function login(req, res) {
   if (!user.is_active) return error(res, 'Your account has been deactivated.', HTTP_STATUS.FORBIDDEN);
 
   const passwordMatch = await bcrypt.compare(password, user.password_hash);
-  if (!passwordMatch) return error(res, 'Invalid credentials.', HTTP_STATUS.UNAUTHORIZED);
+  if (!passwordMatch) {
+    console.warn(`[AUTH] Failed login for ${email} from ${req.ip}`);
+    return error(res, 'Invalid credentials.', HTTP_STATUS.UNAUTHORIZED);
+  }
 
   // Generate unique session ID and store it (invalidates any previous session)
   const sessionId = crypto.randomBytes(32).toString('hex');
@@ -65,6 +69,7 @@ async function register(req, res) {
   if (!restaurantName || !ownerName || !email || !password) {
     return error(res, 'Restaurant name, owner name, email and password are required.', HTTP_STATUS.BAD_REQUEST);
   }
+  if (!isValidEmail(email)) return error(res, 'Invalid email format.', HTTP_STATUS.BAD_REQUEST);
 
   // Check if email already used
   const [existing] = await query('SELECT id FROM users WHERE email = ? LIMIT 1', [email.trim()]);
@@ -74,11 +79,21 @@ async function register(req, res) {
     // Create slug
     const slug = restaurantName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-') + '-' + Date.now();
 
-    // Get default plan
+    // Get default plan matching restaurant type
+    const rType = restaurantType || 'poss';
     let finalPlanId = planId;
     if (!finalPlanId) {
-      const [plans] = await conn.execute('SELECT id FROM plans WHERE is_default = 1 LIMIT 1');
-      finalPlanId = plans[0]?.id || 1;
+      try {
+        const [plans] = await conn.execute(
+          'SELECT id FROM plans WHERE is_default = 1 AND is_active = 1 AND (target_type = ? OR target_type IS NULL) ORDER BY (target_type = ?) DESC LIMIT 1',
+          [rType, rType]
+        );
+        finalPlanId = plans[0]?.id || 1;
+      } catch {
+        // Fallback if target_type column doesn't exist yet
+        const [plans] = await conn.execute('SELECT id FROM plans WHERE is_default = 1 AND is_active = 1 LIMIT 1');
+        finalPlanId = plans[0]?.id || 1;
+      }
     }
 
     const [planRows] = await conn.execute('SELECT id FROM plans WHERE id = ? LIMIT 1', [finalPlanId]);
@@ -88,7 +103,7 @@ async function register(req, res) {
     const [restResult] = await conn.execute(
       `INSERT INTO restaurants (name, slug, type, email, phone, address, city, state, plan_id, subscription_status, subscription_start, subscription_end)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'trial', NOW(), DATE_ADD(NOW(), INTERVAL 14 DAY))`,
-      [restaurantName.trim(), slug, restaurantType || 'dine_in', email.trim(), phone || null, address || null, city || null, state || null, finalPlanId]
+      [restaurantName.trim(), slug, restaurantType || 'poss', email.trim(), phone || null, address || null, city || null, state || null, finalPlanId]
     );
     const restaurantId = restResult.insertId;
 
@@ -116,9 +131,11 @@ async function register(req, res) {
 async function forgotPassword(req, res) {
   const { email } = req.body;
   if (!email) return error(res, 'Email is required.', HTTP_STATUS.BAD_REQUEST);
+  if (!isValidEmail(email)) return error(res, 'Invalid email format.', HTTP_STATUS.BAD_REQUEST);
+
+  console.info(`[AUTH] Password reset requested for ${email} from ${req.ip}`);
 
   const [rows] = await query('SELECT id, name, email FROM users WHERE email = ? LIMIT 1', [email.trim()]);
-  // Always return success to prevent email enumeration
   if (!rows || rows.length === 0) return success(res, null, 'If this email exists, a reset link has been sent.');
 
   const user = rows[0];
@@ -212,7 +229,10 @@ async function pinLogin(req, res) {
   const user = rows[0];
   if (!user.is_active) return error(res, 'Your account has been deactivated.', HTTP_STATUS.FORBIDDEN);
   if (!user.pin_code) return error(res, 'PIN login not configured for this account. Please ask your administrator to set a PIN.', HTTP_STATUS.UNAUTHORIZED);
-  if (user.pin_code !== String(pin)) return error(res, 'Invalid PIN.', HTTP_STATUS.UNAUTHORIZED);
+  if (user.pin_code !== String(pin)) {
+    console.warn(`[AUTH] Failed PIN login for ${email} from ${req.ip}`);
+    return error(res, 'Invalid PIN.', HTTP_STATUS.UNAUTHORIZED);
+  }
 
   // Generate unique session ID and store it (invalidates any previous session)
   const sessionId = crypto.randomBytes(32).toString('hex');

@@ -7,13 +7,13 @@ const { notifyRestaurantOwner } = require('./notification.controller');
 const { buildOrderNumber, recalcOrder } = require('../utils/orderHelpers');
 const { generateTablePin } = require('../utils/pinHelper');
 const { checkFeature } = require('../utils/featureEngine');
+const { sanitizePagination } = require('../utils/validate');
 
 /* ─── list orders ──────────────────────────────────────────────────────────── */
 
 async function getOrders(req, res) {
-  const { page, limit, status, tableId, floorId, search, date, dateFrom, dateTo } = req.query;
-  const parsedPage = parseInt(page, 10) || 1;
-  const parsedLimit = parseInt(limit, 10) || 20;
+  const { status, tableId, floorId, search, date, dateFrom, dateTo } = req.query;
+  const { page: parsedPage, limit: parsedLimit } = sanitizePagination(req.query);
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE o.restaurant_id = ?';
@@ -120,8 +120,8 @@ async function createOrder(req, res) {
   if (!restRows || restRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
   const restaurantType = restRows[0].type;
 
-  const isDineIn = restaurantType === 'dine_in';
-  const effectiveOrderType = orderType || (isDineIn ? 'dine_in' : 'takeaway');
+  const isPoss = restaurantType === 'poss';
+  const effectiveOrderType = orderType || (isPoss ? 'dine_in' : 'takeaway');
 
   // For dine-in with table, check table availability
   let assignedWaiterId = null;
@@ -978,6 +978,237 @@ async function getCustomerOrders(req, res) {
   return success(res, { orders: rows, total: countRows[0].total, page: parsedPage });
 }
 
+/* ─── E-Bill ─────────────────────────────────────────────────────────────── */
+
+const { sendWhatsAppInvoice, sendWhatsAppReview, sendWhatsAppInvoiceReview } = require('../utils/whatsappOtp');
+const crypto = require('crypto');
+
+/**
+ * POST /orders/:orderId/send-ebill  (authenticated)
+ * Generates the bill (if not already), sends e-bill link via WhatsApp.
+ */
+async function sendEBill(req, res) {
+  try {
+    const { orderId } = req.params;
+    const restaurantId = req.user.restaurantId;
+
+    // Fetch restaurant info including WA mode
+    const [restRows] = await query(
+      'SELECT wa_tokens, wa_messaging_mode, google_review_url FROM restaurants WHERE id = ? LIMIT 1',
+      [restaurantId]
+    );
+    if (!restRows || !restRows[0]) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+
+    const waMode = restRows[0].wa_messaging_mode || 1;
+    const googleReviewUrl = restRows[0].google_review_url;
+
+    // Determine token cost based on mode
+    const tokenCost = waMode === 1 ? 1 : waMode === 2 ? 3.5 : 4.5;
+
+    // Check WA token balance
+    if (!restRows[0].wa_tokens || restRows[0].wa_tokens < tokenCost) {
+      return error(res, 'Insufficient WA messaging tokens in your account. Please recharge the tokens.', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    // Validate Google Review URL for modes 2 & 3
+    if (waMode > 1 && !googleReviewUrl) {
+      return error(res, 'Google Maps Review URL not configured. Update it in Settings > WA Messaging.', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    // Fetch order with restaurant info
+    const [rows] = await query(
+      `SELECT o.id, o.order_number, o.customer_name, o.customer_phone, o.total_amount,
+              o.bill_number, o.ebill_token, r.name AS restaurant_name
+       FROM orders o JOIN restaurants r ON r.id = o.restaurant_id
+       WHERE o.id = ? AND o.restaurant_id = ? LIMIT 1`,
+      [orderId, restaurantId]
+    );
+    if (!rows || rows.length === 0) return error(res, 'Order not found.', HTTP_STATUS.NOT_FOUND);
+    const order = rows[0];
+
+    if (!order.customer_phone || order.customer_phone.replace(/\D/g, '').length < 10) {
+      return error(res, 'Valid customer phone number is required.', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    // Generate unique e-bill token if not already set
+    let ebillToken = order.ebill_token;
+    if (!ebillToken) {
+      ebillToken = crypto.randomBytes(16).toString('hex');
+      await query('UPDATE orders SET ebill_token = ? WHERE id = ?', [ebillToken, orderId]);
+    }
+
+    // Generate bill number if not yet assigned (reuse generateBill logic)
+    if (!order.bill_number) {
+      await transaction(async (conn) => {
+        const [restRows] = await conn.execute(
+          'SELECT bill_prefix, bill_counter FROM restaurants WHERE id = ? FOR UPDATE',
+          [restaurantId]
+        );
+        const prefix = (restRows[0]?.bill_prefix || 'INV').toUpperCase();
+        const newCounter = (restRows[0]?.bill_counter || 0) + 1;
+        const billNum = `${prefix}-${String(newCounter).padStart(5, '0')}`;
+        await conn.execute('UPDATE restaurants SET bill_counter = ? WHERE id = ?', [newCounter, restaurantId]);
+        await conn.execute('UPDATE orders SET bill_number = ?, bill_generated = 1, billed_at = NOW() WHERE id = ?', [billNum, orderId]);
+      });
+    }
+
+    // Recalc so totals are fresh
+    await recalcOrder(orderId);
+    const [freshOrder] = await query('SELECT total_amount FROM orders WHERE id = ?', [orderId]);
+    const totalAmount = freshOrder[0]?.total_amount || order.total_amount;
+
+    // Build e-bill URL
+    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0].trim();
+    const ebillUrl = `${frontendUrl}/ebill/${ebillToken}`;
+
+    const customerName = order.customer_name || 'Customer';
+
+    // Send message(s) based on WA messaging mode
+    if (waMode === 1) {
+      // Mode 1: E-bill only (1 token)
+      const variables = [customerName, order.restaurant_name, order.order_number || String(orderId), Number(totalAmount).toFixed(2), ebillUrl];
+      await sendWhatsAppInvoice(order.customer_phone, variables);
+    } else if (waMode === 2) {
+      // Mode 2: E-bill + Review in same message (3.5 tokens)
+      const variables = [customerName, order.restaurant_name, order.order_number || String(orderId), Number(totalAmount).toFixed(2), ebillUrl, googleReviewUrl];
+      await sendWhatsAppInvoiceReview(order.customer_phone, variables);
+    } else if (waMode === 3) {
+      // Mode 3: E-bill + Review as separate messages (4.5 tokens)
+      const invoiceVars = [customerName, order.restaurant_name, order.order_number || String(orderId), Number(totalAmount).toFixed(2), ebillUrl];
+      await sendWhatsAppInvoice(order.customer_phone, invoiceVars);
+      await sendWhatsAppReview(order.customer_phone, googleReviewUrl);
+    }
+
+    // Deduct tokens based on mode
+    await query('UPDATE restaurants SET wa_tokens = wa_tokens - ? WHERE id = ? AND wa_tokens >= ?', [tokenCost, restaurantId, tokenCost]);
+
+    return success(res, { ebillUrl }, 'E-bill sent successfully via WhatsApp.');
+  } catch (err) {
+    console.error('[E-Bill] sendEBill error:', err);
+    return error(res, err.message || 'Failed to send e-bill.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+/**
+ * POST /ebill/:token/verify  (public, no auth)
+ * Verifies the customer phone number against the order.
+ */
+async function verifyEBill(req, res) {
+  try {
+    const { token } = req.params;
+    const { phone } = req.body;
+    if (!phone) return error(res, 'Phone number is required.', HTTP_STATUS.BAD_REQUEST);
+
+    const cleanPhone = phone.replace(/\D/g, '').slice(-10);
+    if (cleanPhone.length < 10) return error(res, 'Enter a valid 10-digit mobile number.', HTTP_STATUS.BAD_REQUEST);
+
+    const [rows] = await query(
+      'SELECT id, customer_phone FROM orders WHERE ebill_token = ? LIMIT 1',
+      [token]
+    );
+    if (!rows || rows.length === 0) return error(res, 'Invalid e-bill link.', HTTP_STATUS.NOT_FOUND);
+
+    const storedPhone = (rows[0].customer_phone || '').replace(/\D/g, '').slice(-10);
+    if (cleanPhone !== storedPhone) {
+      return error(res, 'Mobile number does not match.', HTTP_STATUS.FORBIDDEN);
+    }
+
+    return success(res, { verified: true });
+  } catch (err) {
+    console.error('[E-Bill] verifyEBill error:', err);
+    return error(res, 'Verification failed.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
+/**
+ * GET /ebill/:token/data?phone=XXXXXXXXXX  (public, no auth)
+ * Returns full bill data after phone verification.
+ */
+async function getEBillData(req, res) {
+  try {
+    const { token } = req.params;
+    const { phone } = req.query;
+    if (!phone) return error(res, 'Phone is required.', HTTP_STATUS.BAD_REQUEST);
+
+    const cleanPhone = phone.replace(/\D/g, '').slice(-10);
+
+    const [orderRows] = await query(
+      `SELECT o.*, t.table_number, f.name AS floor_name,
+              u.name AS waiter_name, u.role AS waiter_role,
+              r.name AS restaurant_name, r.address, r.phone AS restaurant_phone, r.gstin, r.logo_url
+       FROM orders o
+       LEFT JOIN tables t ON t.id = o.table_id
+       LEFT JOIN floors f ON f.id = t.floor_id
+       LEFT JOIN users u ON u.id = o.waiter_id
+       LEFT JOIN restaurants r ON r.id = o.restaurant_id
+       WHERE o.ebill_token = ? LIMIT 1`,
+      [token]
+    );
+    if (!orderRows || orderRows.length === 0) return error(res, 'Invalid e-bill link.', HTTP_STATUS.NOT_FOUND);
+    const o = orderRows[0];
+
+    const storedPhone = (o.customer_phone || '').replace(/\D/g, '').slice(-10);
+    if (cleanPhone !== storedPhone) return error(res, 'Phone mismatch.', HTTP_STATUS.FORBIDDEN);
+
+    // Fetch items (merged like generateBill)
+    const [rawItems] = await query(
+      "SELECT * FROM order_items WHERE order_id = ? AND status != 'cancelled' ORDER BY created_at ASC",
+      [o.id]
+    );
+
+    const mergedMap = new Map();
+    let grandTotalTax = 0;
+    for (const item of rawItems) {
+      const addonSig = item.addon_details ? JSON.stringify(item.addon_details) : 'none';
+      const key = `${item.menu_item_id || 'null'}_${item.variant_id || 'null'}_${addonSig}`;
+      const itemTax = o.tax_enabled ? parseFloat(item.tax_amount || 0) : 0;
+      grandTotalTax += itemTax;
+      const lineTotal = parseFloat(item.total_price || 0) - parseFloat(item.discount_amount || 0) + itemTax;
+
+      if (mergedMap.has(key)) {
+        const existing = mergedMap.get(key);
+        existing.quantity += item.quantity;
+        existing.total_price = parseFloat(existing.total_price) + parseFloat(item.total_price);
+        existing.tax_amount = parseFloat(existing.tax_amount) + parseFloat(item.tax_amount);
+        existing.discount_amount = parseFloat(existing.discount_amount || 0) + parseFloat(item.discount_amount || 0);
+        existing.line_total = parseFloat(existing.line_total || 0) + lineTotal;
+      } else {
+        mergedMap.set(key, { ...item, line_total: lineTotal });
+      }
+    }
+    const items = Array.from(mergedMap.values());
+
+    const [adjustments] = await query(
+      'SELECT * FROM bill_adjustments WHERE order_id = ? ORDER BY created_at ASC',
+      [o.id]
+    );
+
+    const [billFormat] = await query(
+      'SELECT * FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1',
+      [o.restaurant_id]
+    );
+
+    const taxBreakdown = [];
+    if (o.tax_enabled && grandTotalTax > 0) {
+      const halfAmount = parseFloat((grandTotalTax / 2).toFixed(2));
+      taxBreakdown.push({ label: 'CGST', rate: null, taxAmount: halfAmount });
+      taxBreakdown.push({ label: 'SGST', rate: null, taxAmount: halfAmount });
+    }
+
+    return success(res, {
+      order: o,
+      items,
+      adjustments,
+      billFormat: billFormat[0] || {},
+      taxBreakdown,
+      enableTax: o.tax_enabled !== 0,
+    });
+  } catch (err) {
+    console.error('[E-Bill] getEBillData error:', err);
+    return error(res, 'Failed to load bill.', HTTP_STATUS.INTERNAL_SERVER_ERROR);
+  }
+}
+
 module.exports = {
   getOrders,
   getKitchenOrders,
@@ -1001,4 +1232,7 @@ module.exports = {
   getCustomerByPhone,
   getCustomers,
   getCustomerOrders,
+  sendEBill,
+  verifyEBill,
+  getEBillData,
 };

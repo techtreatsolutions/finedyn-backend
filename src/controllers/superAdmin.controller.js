@@ -5,7 +5,8 @@ const { query, transaction } = require('../config/database');
 const { success, error, paginate } = require('../utils/responseHelper');
 const { HTTP_STATUS, ROLES } = require('../config/constants');
 const { sendWelcome } = require('../utils/email');
-const { notifySuperAdmins } = require('./notification.controller');
+const { notifySuperAdmins, notifyRestaurantOwner } = require('./notification.controller');
+const { sanitizePagination } = require('../utils/validate');
 
 async function getDashboard(req, res) {
   const [statsRows] = await query(`
@@ -78,9 +79,8 @@ async function getRestaurantStats(req, res) {
 }
 
 async function getAllRestaurants(req, res) {
-  const { page, limit, search, status, planId } = req.query;
-  const parsedPage = parseInt(page, 10) || 1;
-  const parsedLimit = parseInt(limit, 10) || 20;
+  const { search, status, planId } = req.query;
+  const { page: parsedPage, limit: parsedLimit } = sanitizePagination(req.query);
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE 1=1';
@@ -149,10 +149,28 @@ async function createRestaurant(req, res) {
 
   const result = await transaction(async (conn) => {
     const slug = restaurantName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-') + '-' + Date.now();
+
+    // Resolve plan: use provided planId or pick default for the restaurant type
+    const rType = restaurantType || 'poss';
+    let finalPlanId = planId;
+    if (!finalPlanId) {
+      try {
+        const [plans] = await conn.execute(
+          'SELECT id FROM plans WHERE is_default = 1 AND is_active = 1 AND (target_type = ? OR target_type IS NULL) ORDER BY (target_type = ?) DESC LIMIT 1',
+          [rType, rType]
+        );
+        finalPlanId = plans[0]?.id || 1;
+      } catch {
+        // Fallback if target_type column doesn't exist yet
+        const [plans] = await conn.execute('SELECT id FROM plans WHERE is_default = 1 AND is_active = 1 LIMIT 1');
+        finalPlanId = plans[0]?.id || 1;
+      }
+    }
+
     const [restResult] = await conn.execute(
       `INSERT INTO restaurants (name, slug, type, email, phone, address, city, state, plan_id, subscription_status, subscription_start, subscription_end)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'trial', NOW(), DATE_ADD(NOW(), INTERVAL 14 DAY))`,
-      [restaurantName.trim(), slug, restaurantType || 'dine_in', email.trim(), phone || null, address || null, city || null, state || null, planId || 1]
+      [restaurantName.trim(), slug, rType, email.trim(), phone || null, address || null, city || null, state || null, finalPlanId]
     );
     const restaurantId = restResult.insertId;
     const hash = await bcrypt.hash(finalPassword, 12);
@@ -342,13 +360,16 @@ async function getAllPlans(req, res) {
 }
 
 async function createPlan(req, res) {
-  const { name, description, priceMonthly, priceYearly, maxFloors, maxTables, maxMenuItems, maxStaff, maxBillsPerDay, maxBillsPerMonth, featureWaiterApp, featureDigitalMenu, featureEdineInOrders, featureReservations, featureInventory, featureExpenseManagement, featureEmployeeManagement, featureKds, featureAnalytics } = req.body;
+  const { name, description, priceMonthly, priceYearly, maxFloors, maxTables, maxMenuItems, maxStaff, maxBillsPerDay, maxBillsPerMonth, featureWaiterApp, featureDigitalMenu, featureEdineInOrders, featureReservations, featureInventory, featureExpenseManagement, featureEmployeeManagement, featureKds, featureAnalytics, targetType } = req.body;
   if (!name || !priceMonthly) return error(res, 'name and priceMonthly are required.', HTTP_STATUS.BAD_REQUEST);
 
+  const validTargetTypes = ['poss', 'qr', null];
+  const finalTargetType = validTargetTypes.includes(targetType) ? (targetType || null) : null;
+
   const [result] = await query(
-    `INSERT INTO plans (name, description, price_monthly, price_yearly, max_floors, max_tables, max_menu_items, max_staff, max_bills_per_day, max_bills_per_month, feature_waiter_app, feature_digital_menu, feature_edine_in_orders, feature_reservations, feature_inventory, feature_expense_management, feature_employee_management, feature_kds, feature_analytics)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [name, description || null, priceMonthly, priceYearly || 0, maxFloors || 2, maxTables || 20, maxMenuItems || 100, maxStaff || 10, maxBillsPerDay || 200, maxBillsPerMonth || 5000, featureWaiterApp !== false ? 1 : 0, featureDigitalMenu !== false ? 1 : 0, featureEdineInOrders !== false ? 1 : 0, featureReservations !== false ? 1 : 0, featureInventory !== false ? 1 : 0, featureExpenseManagement !== false ? 1 : 0, featureEmployeeManagement !== false ? 1 : 0, featureKds !== false ? 1 : 0, featureAnalytics !== false ? 1 : 0]
+    `INSERT INTO plans (name, description, price_monthly, price_yearly, max_floors, max_tables, max_menu_items, max_staff, max_bills_per_day, max_bills_per_month, feature_waiter_app, feature_digital_menu, feature_edine_in_orders, feature_reservations, feature_inventory, feature_expense_management, feature_employee_management, feature_kds, feature_analytics, target_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [name, description || null, priceMonthly, priceYearly || 0, maxFloors || 2, maxTables || 20, maxMenuItems || 100, maxStaff || 10, maxBillsPerDay || 200, maxBillsPerMonth || 5000, featureWaiterApp !== false ? 1 : 0, featureDigitalMenu !== false ? 1 : 0, featureEdineInOrders !== false ? 1 : 0, featureReservations !== false ? 1 : 0, featureInventory !== false ? 1 : 0, featureExpenseManagement !== false ? 1 : 0, featureEmployeeManagement !== false ? 1 : 0, featureKds !== false ? 1 : 0, featureAnalytics !== false ? 1 : 0, finalTargetType]
   );
   return success(res, { id: result.insertId }, 'Plan created.', HTTP_STATUS.CREATED);
 }
@@ -372,6 +393,7 @@ async function updatePlan(req, res) {
     feature_kds: fields.featureKds !== undefined ? (fields.featureKds ? 1 : 0) : undefined,
     feature_analytics: fields.featureAnalytics !== undefined ? (fields.featureAnalytics ? 1 : 0) : undefined,
     is_active: fields.isActive !== undefined ? (fields.isActive ? 1 : 0) : undefined,
+    target_type: fields.targetType !== undefined ? (fields.targetType || null) : undefined,
   }).filter(([, v]) => v !== undefined);
 
   if (!updates.length) return error(res, 'No fields to update.', HTTP_STATUS.BAD_REQUEST);
@@ -433,4 +455,91 @@ async function resetUserPassword(req, res) {
   return success(res, null, 'Password reset successfully.');
 }
 
-module.exports = { getDashboard, getAllRestaurants, getRestaurantById, getRestaurantStats, createRestaurant, updateRestaurant, toggleRestaurantStatus, renewSubscription, updateCurrentPlan, overrideFeature, removeOverride, getAllPlans, createPlan, updatePlan, deletePlan, getSettlements, resetUserPassword };
+// ─── WA Messaging Token Management ─────────────────────────────────────────
+
+async function getWATokens(req, res) {
+  const [rows] = await query(
+    'SELECT id, name, slug, type, wa_tokens, is_active FROM restaurants ORDER BY name ASC'
+  );
+
+  // Total tokens used across all restaurants (sum of all recharge amounts minus current balances)
+  const [totalRechargedRows] = await query(
+    "SELECT COALESCE(SUM(amount), 0) AS total FROM wa_token_history WHERE action = 'recharge'"
+  );
+  const [totalDeductedRows] = await query(
+    "SELECT COALESCE(SUM(amount), 0) AS total FROM wa_token_history WHERE action = 'deduct'"
+  );
+  const totalRecharged = Number(totalRechargedRows[0]?.total || 0);
+  const totalManualDeducted = Number(totalDeductedRows[0]?.total || 0);
+  const totalBalance = (rows || []).reduce((s, r) => s + (r.wa_tokens || 0), 0);
+  // Tokens used = total recharged - total manual deducted - current balance (the difference is auto-deductions like e-bills)
+  const totalUsed = totalRecharged - totalManualDeducted - totalBalance;
+
+  // Per-restaurant tokens used: recharged - manual_deducted - current_balance
+  const [perRestaurant] = await query(
+    `SELECT restaurant_id,
+       SUM(CASE WHEN action = 'recharge' THEN amount ELSE 0 END) AS recharged,
+       SUM(CASE WHEN action = 'deduct' THEN amount ELSE 0 END) AS manual_deducted
+     FROM wa_token_history GROUP BY restaurant_id`
+  );
+  const usageMap = {};
+  (perRestaurant || []).forEach(r => {
+    usageMap[r.restaurant_id] = { recharged: Number(r.recharged), manualDeducted: Number(r.manual_deducted) };
+  });
+
+  const enriched = (rows || []).map(r => {
+    const info = usageMap[r.id] || { recharged: 0, manualDeducted: 0 };
+    return { ...r, tokens_used: info.recharged - info.manualDeducted - (r.wa_tokens || 0), tokens_recharged: info.recharged };
+  });
+
+  return success(res, { restaurants: enriched, totalUsed, totalRecharged, totalBalance });
+}
+
+async function updateWATokens(req, res) {
+  const { restaurantId, amount, action } = req.body;
+  if (!restaurantId || !amount || amount <= 0) return error(res, 'Restaurant and positive amount are required.', HTTP_STATUS.BAD_REQUEST);
+  if (!['recharge', 'deduct'].includes(action)) return error(res, 'Action must be recharge or deduct.', HTTP_STATUS.BAD_REQUEST);
+
+  const [rRows] = await query('SELECT id, wa_tokens FROM restaurants WHERE id = ? LIMIT 1', [restaurantId]);
+  if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
+
+  if (action === 'deduct' && rRows[0].wa_tokens < amount) {
+    return error(res, `Cannot deduct ${amount} tokens. Current balance: ${rRows[0].wa_tokens}.`, HTTP_STATUS.BAD_REQUEST);
+  }
+
+  const sign = action === 'recharge' ? '+' : '-';
+  await query(`UPDATE restaurants SET wa_tokens = wa_tokens ${sign} ? WHERE id = ?`, [amount, restaurantId]);
+
+  const [updated] = await query('SELECT wa_tokens FROM restaurants WHERE id = ? LIMIT 1', [restaurantId]);
+  const newBalance = updated[0].wa_tokens;
+
+  // Log to history (only super admin manual actions)
+  await query(
+    'INSERT INTO wa_token_history (restaurant_id, action, amount, balance_after, performed_by) VALUES (?, ?, ?, ?, ?)',
+    [restaurantId, action, amount, newBalance, req.user.id]
+  );
+
+  // Notify restaurant owner
+  if (action === 'recharge') {
+    notifyRestaurantOwner(restaurantId, 'success', 'WA Tokens Recharged', `${amount} WhatsApp messaging tokens have been added to your account. New balance: ${newBalance} tokens.`);
+  } else if (newBalance === 0) {
+    notifyRestaurantOwner(restaurantId, 'warning', 'WA Tokens Exhausted', 'Your WhatsApp messaging tokens have been fully deducted. Phone verification for customers will be unavailable until tokens are recharged.');
+  }
+
+  return success(res, { newBalance }, `${amount} tokens ${action === 'recharge' ? 'added' : 'deducted'}. New balance: ${newBalance}.`);
+}
+
+async function getWATokenHistory(req, res) {
+  const { id } = req.params;
+  const [rows] = await query(
+    `SELECT h.*, u.name AS performed_by_name
+     FROM wa_token_history h
+     LEFT JOIN users u ON u.id = h.performed_by
+     WHERE h.restaurant_id = ?
+     ORDER BY h.created_at DESC LIMIT 100`,
+    [id]
+  );
+  return success(res, rows || []);
+}
+
+module.exports = { getDashboard, getAllRestaurants, getRestaurantById, getRestaurantStats, createRestaurant, updateRestaurant, toggleRestaurantStatus, renewSubscription, updateCurrentPlan, overrideFeature, removeOverride, getAllPlans, createPlan, updatePlan, deletePlan, getSettlements, resetUserPassword, getWATokens, updateWATokens, getWATokenHistory };

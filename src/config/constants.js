@@ -35,8 +35,8 @@ const PAYMENT_MODES = Object.freeze({
 });
 
 const RESTAURANT_TYPES = Object.freeze({
-  QSR: 'qsr',
-  DINE_IN: 'dine_in',
+  POSS: 'poss',
+  QR: 'qr',
 });
 
 const SUBSCRIPTION_STATUS = Object.freeze({

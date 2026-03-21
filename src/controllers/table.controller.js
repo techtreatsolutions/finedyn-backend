@@ -74,11 +74,21 @@ async function createTable(req, res) {
 
 async function updateTable(req, res) {
   const { tableId } = req.params;
-  const { tableNumber, capacity, shape, floorId } = req.body;
-  await query(
-    'UPDATE tables SET table_number = COALESCE(?, table_number), capacity = COALESCE(?, capacity), shape = COALESCE(?, shape), floor_id = COALESCE(?, floor_id) WHERE id = ? AND restaurant_id = ?',
-    [tableNumber || null, capacity || null, shape || null, floorId || null, tableId, req.user.restaurantId]
-  );
+  const { tableNumber, capacity, shape, floorId, status } = req.body;
+
+  const sets = ['table_number = COALESCE(?, table_number)', 'capacity = COALESCE(?, capacity)', 'shape = COALESCE(?, shape)', 'floor_id = COALESCE(?, floor_id)'];
+  const vals = [tableNumber || null, capacity || null, shape || null, floorId || null];
+
+  if (status) {
+    const validStatuses = ['available', 'occupied', 'reserved', 'cleaning'];
+    if (validStatuses.includes(status)) {
+      sets.push('status = ?');
+      vals.push(status);
+    }
+  }
+
+  vals.push(tableId, req.user.restaurantId);
+  await query(`UPDATE tables SET ${sets.join(', ')} WHERE id = ? AND restaurant_id = ?`, vals);
   return success(res, null, 'Table updated.');
 }
 

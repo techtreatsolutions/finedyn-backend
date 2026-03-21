@@ -40,9 +40,10 @@ async function authenticate(req, res, next) {
       return error(res, 'Your restaurant account is inactive.', HTTP_STATUS.FORBIDDEN);
     }
 
-    // Single-session enforcement: reject if session ID doesn't match (logged in elsewhere)
-    if (decoded.sid && user.active_session_id && decoded.sid !== user.active_session_id) {
-      return error(res, 'Your session has expired because your account was logged in on another device.', HTTP_STATUS.UNAUTHORIZED);
+    if (user.active_session_id) {
+      if (!decoded.sid || decoded.sid !== user.active_session_id) {
+        return error(res, 'Your session has expired because your account was logged in on another device.', HTTP_STATUS.UNAUTHORIZED);
+      }
     }
 
     req.user = {

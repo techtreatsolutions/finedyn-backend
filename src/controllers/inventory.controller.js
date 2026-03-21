@@ -4,6 +4,7 @@ const { query, transaction } = require('../config/database');
 const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS } = require('../config/constants');
 const { checkFeature } = require('../utils/featureEngine');
+const { isPositiveNumber, isNonNegativeNumber } = require('../utils/validate');
 
 /* ─── categories ───────────────────────────────────────────────────────────── */
 
@@ -138,7 +139,8 @@ async function deleteInventoryItem(req, res) {
 async function stockIn(req, res) {
   const { itemId } = req.params;
   const { quantity, notes, costPerUnit } = req.body;
-  if (!quantity || quantity <= 0) return error(res, 'Positive quantity required.', HTTP_STATUS.BAD_REQUEST);
+  if (!isPositiveNumber(quantity)) return error(res, 'Positive quantity required.', HTTP_STATUS.BAD_REQUEST);
+  if (costPerUnit !== undefined && costPerUnit !== null && !isNonNegativeNumber(costPerUnit)) return error(res, 'Cost per unit must be a non-negative number.', HTTP_STATUS.BAD_REQUEST);
 
   const [itemRows] = await query(
     'SELECT * FROM inventory_items WHERE id = ? AND restaurant_id = ? LIMIT 1',
@@ -164,7 +166,7 @@ async function stockIn(req, res) {
 async function stockOut(req, res) {
   const { itemId } = req.params;
   const { quantity, notes } = req.body;
-  if (!quantity || quantity <= 0) return error(res, 'Positive quantity required.', HTTP_STATUS.BAD_REQUEST);
+  if (!isPositiveNumber(quantity)) return error(res, 'Positive quantity required.', HTTP_STATUS.BAD_REQUEST);
 
   const [itemRows] = await query(
     'SELECT * FROM inventory_items WHERE id = ? AND restaurant_id = ? LIMIT 1',

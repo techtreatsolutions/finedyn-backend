@@ -6,6 +6,7 @@ const { HTTP_STATUS } = require('../config/constants');
 const { checkFeature } = require('../utils/featureEngine');
 const { notifyRestaurantOwner } = require('./notification.controller');
 const { buildOrderNumber } = require('../utils/orderHelpers');
+const { sanitizePagination } = require('../utils/validate');
 
 /*
   Reservation blocking window:
@@ -27,7 +28,7 @@ const RESERVATION_BLOCK_SQL = `
  * Returns the conflicting reservation or null.
  */
 async function getTableReservationConflict(tableId, date, time, excludeReservationId) {
-  let sql = `SELECT id, reservation_time, customer_name FROM reservations WHERE restaurant_id = (SELECT restaurant_id FROM tables WHERE id = ? LIMIT 1) AND ${RESERVATION_BLOCK_SQL}`;
+  let sql = `SELECT r.id, r.reservation_time, r.customer_name FROM reservations r WHERE r.restaurant_id = (SELECT restaurant_id FROM tables WHERE id = ? LIMIT 1) AND ${RESERVATION_BLOCK_SQL}`;
   const params = [tableId, tableId, date, time, time];
   if (excludeReservationId) {
     sql += ' AND id != ?';
@@ -40,9 +41,8 @@ async function getTableReservationConflict(tableId, date, time, excludeReservati
 
 
 async function getReservations(req, res) {
-  const { date, status, page = 1, limit = 20 } = req.query;
-  const parsedPage = parseInt(page, 10) || 1;
-  const parsedLimit = parseInt(limit, 10) || 20;
+  const { date, status } = req.query;
+  const { page: parsedPage, limit: parsedLimit } = sanitizePagination(req.query);
   const offset = (parsedPage - 1) * parsedLimit;
 
   let where = 'WHERE r.restaurant_id = ?';
@@ -416,7 +416,7 @@ async function deleteReservation(req, res) {
       [rows[0].table_id, req.user.restaurantId]
     );
   }
-  await query('DELETE FROM reservations WHERE id = ?', [reservationId]);
+  await query('DELETE FROM reservations WHERE id = ? AND restaurant_id = ?', [reservationId, req.user.restaurantId]);
   return success(res, null, 'Reservation deleted.');
 }
 

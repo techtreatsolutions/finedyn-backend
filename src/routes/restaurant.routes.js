@@ -5,6 +5,7 @@ const router = express.Router();
 const { authenticate } = require('../middleware/auth');
 const { requireRole } = require('../middleware/roleCheck');
 const ctrl = require('../controllers/restaurant.controller');
+const qrSettingsCtrl = require('../controllers/qrSettings.controller');
 
 const { upload, billImageUpload } = require('../middleware/upload.middleware');
 
@@ -52,5 +53,14 @@ router.post('/bill-format/upload-image/:type', ...ownerManager, (req, res) => {
         res.json({ success: true, imageUrl: req.file.path });
     });
 });
+
+// WA Messaging Settings
+router.get('/wa-messaging-settings', ...ownerManager, ctrl.getWAMessagingSettings);
+router.put('/wa-messaging-settings', ...ownerOnly, ctrl.updateWAMessagingSettings);
+
+// QR Settings
+router.get('/qr-settings', ...ownerManager, qrSettingsCtrl.getQRSettings);
+router.put('/qr-settings', ...ownerManager, qrSettingsCtrl.updateQRSettings);
+router.post('/generate-standalone-qr', ...ownerManager, qrSettingsCtrl.generateStandaloneQR);
 
 module.exports = router;

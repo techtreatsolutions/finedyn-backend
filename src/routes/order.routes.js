@@ -39,5 +39,6 @@ router.post('/:orderId/reopen', ...auth, ctrl.reopenOrder);
 router.post('/:orderId/cancel', ...auth, ctrl.cancelOrder);
 router.get('/:orderId/bill', ...auth, ctrl.generateBill);
 router.patch('/:orderId/customer', ...auth, ctrl.updateOrderCustomer);
+router.post('/:orderId/send-ebill', ...auth, ctrl.sendEBill);
 
 module.exports = router;
