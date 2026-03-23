@@ -64,23 +64,17 @@ if (process.env.NODE_ENV !== 'test') app.use(morgan(process.env.NODE_ENV === 'pr
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
-// Rate limiting
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 200,
-  standardHeaders: true, legacyHeaders: false,
-  message: { success: false, message: 'Too many requests.' },
-});
+// Rate limiting — only on sensitive endpoints, not globally (POS apps make thousands of requests per day)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 15,
   standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many auth attempts. Try again in 15 minutes.' },
 });
 const publicLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 30,
+  windowMs: 15 * 60 * 1000, max: 60,
   standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many requests.' },
 });
-app.use('/api/', globalLimiter);
 
 // Health (both /health and /api/health for compatibility)
 async function healthHandler(req, res) {
