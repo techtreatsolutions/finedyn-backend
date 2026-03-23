@@ -46,7 +46,8 @@ async function getOrders(req, res) {
   const [rows] = await query(
     `SELECT o.*, t.table_number, f.name AS floor_name,
             u.name AS waiter_name, c.name AS cashier_name,
-            (SELECT SUM(amount) FROM payments WHERE order_id = o.id AND status = 'paid') AS total_collected
+            (SELECT SUM(amount) FROM payments WHERE order_id = o.id AND status = 'paid') AS total_collected,
+            (SELECT COUNT(*) FROM order_items WHERE order_id = o.id AND status != 'cancelled') AS item_count
      ${joinClause}
      ${where}
      ORDER BY o.created_at DESC
@@ -138,8 +139,9 @@ async function createOrder(req, res) {
       return error(res, 'Table is reserved for an upcoming reservation. Use "Start Order" from the reservation to seat guests.', HTTP_STATUS.CONFLICT);
     }
     const { getTableReservationConflict } = require('./reservation.controller');
-    const today = new Date().toISOString().split('T')[0];
-    const nowTime = new Date().toTimeString().split(' ')[0];
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const nowTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
     const conflict = await getTableReservationConflict(tableId, today, nowTime);
     if (conflict) {
       const timeStr = conflict.reservation_time?.toString().slice(0, 5);

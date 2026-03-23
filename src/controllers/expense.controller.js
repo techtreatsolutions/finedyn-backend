@@ -89,7 +89,7 @@ async function createExpense(req, res) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
     [
       req.user.restaurantId, categoryId || null, title, amount,
-      paymentMode || 'cash', expenseDate || new Date().toISOString().split('T')[0],
+      paymentMode || 'cash', expenseDate || (() => { const n = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; })(),
       notes || null, receiptUrl || null, req.user.id
     ]
   );

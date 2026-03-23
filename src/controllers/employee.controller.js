@@ -58,7 +58,7 @@ async function createEmployee(req, res) {
     [
       req.user.restaurantId, userId || null, name, phone || null,
       department || null, designation || null, baseSalary || 0,
-      joiningDate || new Date().toISOString().split('T')[0],
+      joiningDate || (() => { const n = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; })(),
       designation || department || 'Staff'
     ]
   );
