@@ -37,6 +37,14 @@ let pool;
 function getPool() {
   if (!pool) {
     pool = mysql.createPool(poolConfig);
+
+    // Force every new connection to use IST session timezone.
+    // This ensures NOW(), CURTIME(), CURDATE(), CURRENT_TIMESTAMP all return IST
+    // regardless of the MySQL server's system timezone (which may be UTC on cloud servers).
+    pool.pool.on('connection', (connection) => {
+      connection.query("SET time_zone = '+05:30'");
+    });
+
     pool.on('error', (err) => {
       console.error('[DB] Pool error:', err.message);
     });
@@ -81,8 +89,9 @@ async function testConnection() {
   try {
     const connection = await db.getConnection();
     await connection.ping();
+    const [[tzRow]] = await connection.query("SELECT @@session.time_zone AS tz, NOW() AS server_now");
     connection.release();
-    console.log('[DB] Connection pool established successfully.');
+    console.log(`[DB] Connection pool established. Session timezone: ${tzRow.tz}, Server NOW(): ${tzRow.server_now}`);
     return true;
   } catch (err) {
     console.error('[DB] Failed to connect to MySQL:', err.message);
