@@ -11,6 +11,7 @@ const { checkFeature } = require('../utils/featureEngine');
 const { requestOTP, verifyOTP } = require('../utils/whatsappOtp');
 const { decrypt } = require('../utils/encryption');
 const { notifyRestaurantOwner } = require('./notification.controller');
+const { sendPushToRole } = require('../utils/firebase');
 
 /**
  * Initiate a refund for a given payment via the restaurant's active gateway.
@@ -399,6 +400,19 @@ async function placeQROrder(req, res) {
       [restaurantId, tableId, sessionToken, customerName || null, customerPhone || null,
         JSON.stringify(enrichedItems), specialInstructions || null, 'counter']
     );
+
+    // Send push notification to restaurant staff (non-blocking)
+    const [tblRows] = await query('SELECT table_number FROM tables WHERE id = ? LIMIT 1', [tableId]);
+    const tblNum = tblRows?.[0]?.table_number || tableId;
+    const itemCount = enrichedItems.reduce((s, i) => s + i.quantity, 0);
+    const pushTitle = 'New QR Order';
+    const pushBody = `Table ${tblNum} — ${itemCount} item${itemCount > 1 ? 's' : ''}${customerName ? ` by ${customerName}` : ''}`;
+    const pushData = { type: 'new_qr_order', qrOrderId: String(result.insertId), restaurantId: String(restaurantId) };
+
+    // Notify owners/managers
+    notifyRestaurantOwner(restaurantId, 'new_qr_order', pushTitle, pushBody).catch(() => {});
+    // Notify cashiers
+    sendPushToRole(restaurantId, 'cashier', pushTitle, pushBody, pushData).catch(() => {});
 
     return success(res, { qrOrderId: result.insertId }, 'Order placed! Waiting for staff confirmation.', HTTP_STATUS.CREATED);
   } catch (err) {
@@ -942,6 +956,18 @@ async function placeQRModelOrder(req, res) {
         JSON.stringify(enrichedItems), specialInstructions || null, pref,
         razorpayOrderId || null, razorpayPaymentId || null, enableTax ? 1 : 0]
     );
+
+    // Send push notification to restaurant staff (non-blocking)
+    const itemCount = enrichedItems.reduce((s, i) => s + i.quantity, 0);
+    let pushBody = `${orderType === 'dine_in' ? 'Dine-in' : orderType === 'takeaway' ? 'Takeaway' : 'Delivery'} — ${itemCount} item${itemCount > 1 ? 's' : ''}`;
+    if (customerName) pushBody += ` by ${customerName}`;
+    if (orderType === 'dine_in' && tableId) {
+      const [tblR] = await query('SELECT table_number FROM tables WHERE id = ? LIMIT 1', [tableId]);
+      if (tblR?.[0]?.table_number) pushBody = `Table ${tblR[0].table_number} — ${pushBody}`;
+    }
+    const pushData = { type: 'new_qr_order', qrOrderId: String(result.insertId), restaurantId: String(restaurantId) };
+    notifyRestaurantOwner(restaurantId, 'new_qr_order', 'New QR Order', pushBody).catch(() => {});
+    sendPushToRole(restaurantId, 'cashier', 'New QR Order', pushBody, pushData).catch(() => {});
 
     return success(res, { qrOrderId: result.insertId }, 'Order placed! Waiting for restaurant confirmation.', HTTP_STATUS.CREATED);
   } catch (err) {
