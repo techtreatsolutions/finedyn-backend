@@ -12,7 +12,7 @@ const { sanitizePagination } = require('../utils/validate');
 /* ─── list orders ──────────────────────────────────────────────────────────── */
 
 async function getOrders(req, res) {
-  const { status, tableId, floorId, search, date, dateFrom, dateTo } = req.query;
+  const { status, tableId, floorId, search, date, dateFrom, dateTo, paymentStatus, orderType } = req.query;
   const { page: parsedPage, limit: parsedLimit } = sanitizePagination(req.query);
   const offset = (parsedPage - 1) * parsedLimit;
 
@@ -20,6 +20,8 @@ async function getOrders(req, res) {
   const params = [req.user.restaurantId];
 
   if (status) { where += ' AND o.status = ?'; params.push(status); }
+  if (paymentStatus) { where += ' AND o.payment_status = ?'; params.push(paymentStatus); }
+  if (orderType) { where += ' AND o.order_type = ?'; params.push(orderType); }
   if (tableId) { where += ' AND o.table_id = ?'; params.push(tableId); }
   if (floorId) { where += ' AND t.floor_id = ?'; params.push(floorId); }
   if (search) {
@@ -98,6 +100,7 @@ async function getOrderById(req, res) {
     adjustments,
     payments,
     total_paid: totalPaid,
+    total_collected: totalPaid,
   });
 }
 

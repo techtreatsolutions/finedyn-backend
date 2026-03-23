@@ -11,7 +11,7 @@ const baseConfig = {
   keepAliveInitialDelay: 0,
   timezone: '+05:30',
   decimalNumbers: true,
-  dateStrings: false,
+  dateStrings: true,
 };
 
 let poolConfig;
