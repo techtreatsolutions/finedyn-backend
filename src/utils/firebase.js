@@ -48,9 +48,20 @@ async function sendPush(fcmToken, title, body, data = {}) {
       android: {
         priority: 'high',
         notification: {
-          channelId: 'finedyn_orders',
+          channelId: 'finedyn_order_alerts',
           sound: 'default',
           icon: 'ic_notification',
+          defaultVibrateTimings: false,
+          vibrateTimingsMillis: [0, 400, 200, 400, 200, 400],
+          notificationCount: 1,
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            sound: { critical: 1, name: 'default', volume: 1.0 },
+            'interruption-level': 'time-sensitive',
+          },
         },
       },
     };
