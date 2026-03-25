@@ -32,6 +32,14 @@ router.get('/wa-tokens', ...sa, ctrl.getWATokens);
 router.post('/wa-tokens', ...sa, ctrl.updateWATokens);
 router.get('/wa-tokens/:id/history', ...sa, ctrl.getWATokenHistory);
 
+// App Update Settings
+router.get('/app-update', ...sa, ctrl.getAppUpdateSettings);
+router.put('/app-update', ...sa, ctrl.updateAppUpdateSettings);
+
+// Broadcast Notifications
+router.post('/send-notification', ...sa, ctrl.sendBroadcastNotification);
+router.get('/search-targets', ...sa, ctrl.searchNotificationTargets);
+
 // Demo & Support requests
 const formCtrl = require('../controllers/publicForms.controller');
 router.get('/demo-requests', ...sa, formCtrl.getDemoRequests);

@@ -7,6 +7,7 @@ const { HTTP_STATUS, ROLES } = require('../config/constants');
 const { sendWelcome } = require('../utils/email');
 const { notifySuperAdmins, notifyRestaurantOwner } = require('./notification.controller');
 const { sanitizePagination } = require('../utils/validate');
+const { sendPush, sendPushToUser, sendPushToRole, sendPushToRestaurant } = require('../utils/firebase');
 
 async function getDashboard(req, res) {
   const [statsRows] = await query(`
@@ -542,4 +543,141 @@ async function getWATokenHistory(req, res) {
   return success(res, rows || []);
 }
 
-module.exports = { getDashboard, getAllRestaurants, getRestaurantById, getRestaurantStats, createRestaurant, updateRestaurant, toggleRestaurantStatus, renewSubscription, updateCurrentPlan, overrideFeature, removeOverride, getAllPlans, createPlan, updatePlan, deletePlan, getSettlements, resetUserPassword, getWATokens, updateWATokens, getWATokenHistory };
+// ── App Update Settings ──────────────────────────────────────
+
+async function getAppUpdateSettings(req, res) {
+  const [rows] = await query('SELECT * FROM app_update_settings WHERE id = 1 LIMIT 1');
+  if (!rows || rows.length === 0) {
+    return success(res, { latest_version: '1.0.0', playstore_url: null, update_type: 'optional', update_message: null });
+  }
+  return success(res, rows[0]);
+}
+
+async function updateAppUpdateSettings(req, res) {
+  const { latestVersion, playstoreUrl, updateType, updateMessage } = req.body;
+  if (!latestVersion) return error(res, 'Latest version is required.', HTTP_STATUS.BAD_REQUEST);
+  if (!['mandatory', 'optional'].includes(updateType)) return error(res, 'Update type must be mandatory or optional.', HTTP_STATUS.BAD_REQUEST);
+
+  // Validate version format (x.y.z)
+  if (!/^\d+\.\d+\.\d+$/.test(latestVersion)) return error(res, 'Version must be in format x.y.z (e.g. 1.2.0).', HTTP_STATUS.BAD_REQUEST);
+
+  await query(
+    `INSERT INTO app_update_settings (id, latest_version, playstore_url, update_type, update_message, updated_by)
+     VALUES (1, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE latest_version = VALUES(latest_version), playstore_url = VALUES(playstore_url),
+       update_type = VALUES(update_type), update_message = VALUES(update_message), updated_by = VALUES(updated_by)`,
+    [latestVersion, playstoreUrl || null, updateType, updateMessage || null, req.user.id]
+  );
+  return success(res, null, 'App update settings saved.');
+}
+
+// ── Broadcast Notification ───────────────────────────────────
+
+async function sendBroadcastNotification(req, res) {
+  const { title, message, roles, restaurantId, userId } = req.body;
+  if (!title) return error(res, 'Title is required.', HTTP_STATUS.BAD_REQUEST);
+
+  const body = message || '';
+  const pushData = { type: 'announcement' };
+  let sentCount = 0;
+
+  // Mode 1: Send to a specific user
+  if (userId) {
+    const [userRows] = await query('SELECT id, restaurant_id FROM users WHERE id = ? AND is_active = 1 LIMIT 1', [userId]);
+    if (!userRows || userRows.length === 0) return error(res, 'User not found.', HTTP_STATUS.NOT_FOUND);
+
+    await query('INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
+      [userId, 'info', title, body || null, userRows[0].restaurant_id]);
+    await sendPushToUser(userId, title, body, pushData);
+    sentCount = 1;
+    return success(res, { sentTo: 'user', userId, sentCount }, 'Notification sent to user.');
+  }
+
+  // Mode 2: Send to a specific restaurant (all users or specific roles)
+  if (restaurantId) {
+    const selectedRoles = Array.isArray(roles) && roles.length > 0 ? roles : null;
+    let roleFilter = '';
+    const params = [restaurantId];
+    if (selectedRoles) {
+      roleFilter = ` AND u.role IN (${selectedRoles.map(() => '?').join(',')})`;
+      params.push(...selectedRoles);
+    }
+
+    const [users] = await query(
+      `SELECT u.id FROM users u WHERE u.restaurant_id = ? AND u.is_active = 1${roleFilter}`,
+      params
+    );
+
+    for (const u of (users || [])) {
+      await query('INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
+        [u.id, 'info', title, body || null, restaurantId]);
+    }
+
+    // Push: send to specific roles or entire restaurant
+    if (selectedRoles) {
+      for (const role of selectedRoles) {
+        await sendPushToRole(restaurantId, role, title, body, pushData);
+      }
+    } else {
+      await sendPushToRestaurant(restaurantId, title, body, pushData);
+    }
+
+    sentCount = (users || []).length;
+    return success(res, { sentTo: 'restaurant', restaurantId, sentCount }, `Notification sent to ${sentCount} user(s).`);
+  }
+
+  // Mode 3: Broadcast to all users globally (selected roles across all restaurants)
+  const selectedRoles = Array.isArray(roles) && roles.length > 0 ? roles : ['owner', 'manager', 'cashier', 'waiter', 'kitchen_staff'];
+
+  const [users] = await query(
+    `SELECT u.id, u.restaurant_id FROM users u
+     WHERE u.is_active = 1 AND u.role IN (${selectedRoles.map(() => '?').join(',')})`,
+    selectedRoles
+  );
+
+  // Insert DB notifications
+  for (const u of (users || [])) {
+    await query('INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
+      [u.id, 'info', title, body || null, u.restaurant_id]);
+  }
+
+  // Push: get all device tokens for selected roles across all restaurants
+  const [tokens] = await query(
+    `SELECT dt.fcm_token FROM device_tokens dt
+     JOIN users u ON u.id = dt.user_id
+     WHERE u.is_active = 1 AND dt.is_active = 1 AND u.role IN (${selectedRoles.map(() => '?').join(',')})`,
+    selectedRoles
+  );
+
+  const pushPromises = (tokens || []).map(t => sendPush(t.fcm_token, title, body, pushData));
+  await Promise.allSettled(pushPromises);
+
+  sentCount = (users || []).length;
+  return success(res, { sentTo: 'broadcast', roles: selectedRoles, sentCount }, `Notification broadcast to ${sentCount} user(s).`);
+}
+
+// ── Search users/restaurants for notification targeting ──────
+
+async function searchNotificationTargets(req, res) {
+  const { q, type } = req.query;
+  if (!q || q.length < 2) return success(res, []);
+
+  if (type === 'restaurant') {
+    const [rows] = await query(
+      `SELECT id, name, city FROM restaurants WHERE is_active = 1 AND (name LIKE ? OR city LIKE ?) LIMIT 10`,
+      [`%${q}%`, `%${q}%`]
+    );
+    return success(res, rows || []);
+  }
+
+  // Default: search users
+  const [rows] = await query(
+    `SELECT u.id, u.name, u.email, u.role, r.name AS restaurant_name
+     FROM users u LEFT JOIN restaurants r ON r.id = u.restaurant_id
+     WHERE u.is_active = 1 AND u.role != 'super_admin' AND (u.name LIKE ? OR u.email LIKE ?) LIMIT 10`,
+    [`%${q}%`, `%${q}%`]
+  );
+  return success(res, rows || []);
+}
+
+module.exports = { getDashboard, getAllRestaurants, getRestaurantById, getRestaurantStats, createRestaurant, updateRestaurant, toggleRestaurantStatus, renewSubscription, updateCurrentPlan, overrideFeature, removeOverride, getAllPlans, createPlan, updatePlan, deletePlan, getSettlements, resetUserPassword, getWATokens, updateWATokens, getWATokenHistory, getAppUpdateSettings, updateAppUpdateSettings, sendBroadcastNotification, searchNotificationTargets };

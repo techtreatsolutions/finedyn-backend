@@ -30,14 +30,18 @@ async function notifySuperAdmins(type, title, message, restaurantId = null) {
 /* ── Helper: notify owner of a restaurant ── */
 async function notifyRestaurantOwner(restaurantId, type, title, message) {
   try {
+    // Insert DB notifications for owners
     const [owners] = await query(
       "SELECT id FROM users WHERE restaurant_id = ? AND role = 'owner' AND is_active = 1",
       [restaurantId]
     );
     for (const owner of (owners || [])) {
-      await notifyUser(owner.id, type, title, message, restaurantId);
+      await query(
+        'INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
+        [owner.id, type, title, message || null, restaurantId]
+      );
     }
-    // Also push to all admins (owner + manager) of this restaurant
+    // Send push to all admins (owner + manager) — single push per device
     sendPushToAdmins(restaurantId, title, message || '', { type }).catch(() => {});
   } catch (_) { /* non-critical */ }
 }

@@ -5,6 +5,7 @@ const { query } = require('../config/database');
 const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS, ROLES } = require('../config/constants');
 const { getEffectiveFeatures } = require('../utils/featureEngine');
+const { deleteCloudinaryImage } = require('../middleware/upload.middleware');
 
 async function getRestaurantProfile(req, res) {
   const [rows] = await query(
@@ -17,6 +18,16 @@ async function getRestaurantProfile(req, res) {
 
 async function updateRestaurantProfile(req, res) {
   const { name, phone, address, city, state, pincode, gstin, fssaiNumber, timezone, billPrefix, logoUrl } = req.body;
+
+  // Delete old logo from Cloudinary if a new one is being set
+  if (logoUrl) {
+    const [oldRows] = await query('SELECT logo_url FROM restaurants WHERE id = ? LIMIT 1', [req.user.restaurantId]);
+    const oldLogoUrl = oldRows?.[0]?.logo_url;
+    if (oldLogoUrl && oldLogoUrl !== logoUrl) {
+      deleteCloudinaryImage(oldLogoUrl).catch(() => {});
+    }
+  }
+
   await query(
     `UPDATE restaurants SET
       name = COALESCE(?, name), phone = COALESCE(?, phone), address = COALESCE(?, address),
@@ -67,7 +78,7 @@ async function getSubscriptionInfo(req, res) {
 async function getDashboardStats(req, res) {
   const rId = req.user.restaurantId;
 
-  const [[todayStats], [last7Days], [popularItems], [recentOrders]] = await Promise.all([
+  const [[todayStats], [last7Days], [popularItems], [recentOrders], [todayCollection]] = await Promise.all([
     query(`SELECT
       COUNT(*) AS total_orders, COALESCE(SUM(total_amount), 0) AS total_revenue,
       COUNT(CASE WHEN payment_status = 'unpaid' AND status NOT IN ('cancelled','completed') THEN 1 END) AS pending_orders,
@@ -87,6 +98,11 @@ async function getDashboardStats(req, res) {
             t.table_number, o.created_at
             FROM orders o LEFT JOIN tables t ON t.id = o.table_id
             WHERE o.restaurant_id = ? ORDER BY o.created_at DESC LIMIT 10`, [rId]),
+
+    query(`SELECT LOWER(p.payment_mode) AS payment_mode, COALESCE(SUM(p.amount), 0) AS total
+      FROM payments p
+      WHERE p.restaurant_id = ? AND p.status = 'success' AND DATE(p.created_at) = CURDATE()
+      GROUP BY LOWER(p.payment_mode)`, [rId]),
   ]);
 
   // Active tables count
@@ -97,6 +113,7 @@ async function getDashboardStats(req, res) {
     salesLast7Days: last7Days,
     popularItems,
     recentOrders,
+    todayCollection: todayCollection,
   });
 }
 
@@ -193,6 +210,18 @@ async function getBillFormatSettings(req, res) {
 
 async function updateBillFormatSettings(req, res) {
   const { showRestaurantName, showLogo, showAddress, showContact, showGst, showWaiterName, showTableNumber, showDateTime, showPaymentMode, showCustomerDetails, enableTax, customHeader, customFooter, headerImageUrl, footerImageUrl, thankYouMessage, billPrinterSizeMm, kotPrinterSizeMm } = req.body;
+
+  // Delete old bill images from Cloudinary if being replaced or cleared
+  const [oldBill] = await query('SELECT header_image_url, footer_image_url FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1', [req.user.restaurantId]);
+  if (oldBill?.[0]) {
+    const old = oldBill[0];
+    if (old.header_image_url && old.header_image_url !== headerImageUrl) {
+      deleteCloudinaryImage(old.header_image_url).catch(() => {});
+    }
+    if (old.footer_image_url && old.footer_image_url !== footerImageUrl) {
+      deleteCloudinaryImage(old.footer_image_url).catch(() => {});
+    }
+  }
 
   const billSize = parseInt(billPrinterSizeMm, 10) || 80;
   const kotSize = parseInt(kotPrinterSizeMm, 10) || 80;

@@ -4,6 +4,7 @@ const { query, transaction } = require('../config/database');
 const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS, ORDER_STATUS, PAYMENT_STATUS } = require('../config/constants');
 const { notifyRestaurantOwner, notifyKitchenStaff, notifyWaiters } = require('./notification.controller');
+const { sendPushToUser } = require('../utils/firebase');
 const { buildOrderNumber, recalcOrder } = require('../utils/orderHelpers');
 const { generateTablePin } = require('../utils/pinHelper');
 const { checkFeature } = require('../utils/featureEngine');
@@ -202,6 +203,14 @@ async function createOrder(req, res) {
     `New Order: ${result.orderNumber}`,
     `A new ${effectiveOrderType.replace('_', ' ')} order has been placed.`
   ).catch(() => { });
+
+  // Notify assigned waiter if different from the user who created the order
+  if (assignedWaiterId && assignedWaiterId !== req.user.id) {
+    sendPushToUser(assignedWaiterId, `New Order: ${result.orderNumber}`,
+      `A new ${effectiveOrderType.replace('_', ' ')} order has been placed on your table.`,
+      { type: 'new_order', orderId: String(result.id), restaurantId: String(restaurantId) }
+    ).catch(() => { });
+  }
 
   return success(res, result, 'Order created.', HTTP_STATUS.CREATED);
 }
@@ -739,8 +748,13 @@ async function updateKitchenItemStatus(req, res) {
   );
   if (!rows || rows.length === 0) return error(res, 'Item not found.', HTTP_STATUS.NOT_FOUND);
   if (rows[0].restaurant_id !== req.user.restaurantId) return error(res, 'Forbidden.', HTTP_STATUS.FORBIDDEN);
+  if (rows[0].status === 'cancelled') return error(res, 'This item has been cancelled and cannot be updated.', HTTP_STATUS.CONFLICT);
 
-  await transaction(async (conn) => {
+  const result = await transaction(async (conn) => {
+    // Re-check inside transaction with row lock to prevent race condition
+    const [fresh] = await conn.execute('SELECT status FROM order_items WHERE id = ? FOR UPDATE', [itemId]);
+    if (fresh[0]?.status === 'cancelled') return { cancelled: true };
+
     await conn.execute('UPDATE order_items SET status = ? WHERE id = ?', [status, itemId]);
 
     const orderId = rows[0].order_id;
@@ -771,8 +785,10 @@ async function updateKitchenItemStatus(req, res) {
         notifyRestaurantOwner(req.user.restaurantId, 'order', `Order #${orderNum} Ready`, `All items in order #${orderNum} are ready.`).catch(() => {});
       }
     }
+    return { cancelled: false };
   });
 
+  if (result.cancelled) return error(res, 'This item has been cancelled and cannot be updated.', HTTP_STATUS.CONFLICT);
   return success(res, null, 'Item status updated.');
 }
 

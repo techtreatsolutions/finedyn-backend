@@ -290,4 +290,39 @@ async function unregisterDevice(req, res) {
   return success(res, null, 'Device unregistered.');
 }
 
-module.exports = { login, register, forgotPassword, resetPassword, getProfile, updateProfile, changePassword, logout, pinLogin, registerDevice, unregisterDevice };
+async function checkAppVersion(req, res) {
+  const { currentVersion } = req.query;
+  if (!currentVersion) return error(res, 'currentVersion query param is required.', HTTP_STATUS.BAD_REQUEST);
+
+  const [rows] = await query('SELECT latest_version, playstore_url, update_type, update_message FROM app_update_settings WHERE id = 1 LIMIT 1');
+  if (!rows || rows.length === 0) {
+    return success(res, { updateRequired: false });
+  }
+
+  const settings = rows[0];
+  const compare = compareVersions(currentVersion, settings.latest_version);
+
+  if (compare >= 0) {
+    return success(res, { updateRequired: false });
+  }
+
+  return success(res, {
+    updateRequired: true,
+    updateType: settings.update_type,
+    latestVersion: settings.latest_version,
+    playstoreUrl: settings.playstore_url,
+    updateMessage: settings.update_message,
+  });
+}
+
+function compareVersions(current, latest) {
+  const c = current.split('.').map(Number);
+  const l = latest.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((c[i] || 0) < (l[i] || 0)) return -1;
+    if ((c[i] || 0) > (l[i] || 0)) return 1;
+  }
+  return 0;
+}
+
+module.exports = { login, register, forgotPassword, resetPassword, getProfile, updateProfile, changePassword, logout, pinLogin, registerDevice, unregisterDevice, checkAppVersion };

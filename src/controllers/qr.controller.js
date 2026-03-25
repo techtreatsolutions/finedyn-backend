@@ -11,7 +11,7 @@ const { checkFeature } = require('../utils/featureEngine');
 const { requestOTP, verifyOTP } = require('../utils/whatsappOtp');
 const { decrypt } = require('../utils/encryption');
 const { notifyRestaurantOwner } = require('./notification.controller');
-const { sendPushToRole } = require('../utils/firebase');
+const { sendPushToRole, sendPushToUser } = require('../utils/firebase');
 
 /**
  * Initiate a refund for a given payment via the restaurant's active gateway.
@@ -402,8 +402,9 @@ async function placeQROrder(req, res) {
     );
 
     // Send push notification to restaurant staff (non-blocking)
-    const [tblRows] = await query('SELECT table_number FROM tables WHERE id = ? LIMIT 1', [tableId]);
+    const [tblRows] = await query('SELECT table_number, assigned_waiter_id FROM tables WHERE id = ? LIMIT 1', [tableId]);
     const tblNum = tblRows?.[0]?.table_number || tableId;
+    const assignedWaiterId = tblRows?.[0]?.assigned_waiter_id || null;
     const itemCount = enrichedItems.reduce((s, i) => s + i.quantity, 0);
     const pushTitle = 'New QR Order';
     const pushBody = `Table ${tblNum} — ${itemCount} item${itemCount > 1 ? 's' : ''}${customerName ? ` by ${customerName}` : ''}`;
@@ -413,6 +414,10 @@ async function placeQROrder(req, res) {
     notifyRestaurantOwner(restaurantId, 'new_qr_order', pushTitle, pushBody).catch(() => {});
     // Notify cashiers
     sendPushToRole(restaurantId, 'cashier', pushTitle, pushBody, pushData).catch(() => {});
+    // Notify assigned waiter
+    if (assignedWaiterId) {
+      sendPushToUser(assignedWaiterId, pushTitle, pushBody, pushData).catch(() => {});
+    }
 
     return success(res, { qrOrderId: result.insertId }, 'Order placed! Waiting for staff confirmation.', HTTP_STATUS.CREATED);
   } catch (err) {

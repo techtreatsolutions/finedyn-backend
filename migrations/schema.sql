@@ -884,6 +884,24 @@ CREATE TABLE IF NOT EXISTS `device_tokens` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
+-- APP UPDATE SETTINGS (Global, managed by super admin)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `app_update_settings` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `latest_version` VARCHAR(20) NOT NULL DEFAULT '1.0.0',
+  `playstore_url` VARCHAR(500) DEFAULT NULL,
+  `update_type` ENUM('mandatory', 'optional') NOT NULL DEFAULT 'optional',
+  `update_message` TEXT DEFAULT NULL,
+  `updated_by` INT DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Seed a default row
+INSERT INTO `app_update_settings` (`id`, `latest_version`, `update_type`) VALUES (1, '1.0.0', 'optional')
+ON DUPLICATE KEY UPDATE `updated_at` = CURRENT_TIMESTAMP;
+
+-- ============================================================
 -- DEFAULT DATA
 -- ============================================================
 INSERT INTO `plans` (`id`, `name`, `description`, `price_monthly`, `price_yearly`, `max_floors`, `max_tables`, `max_menu_items`, `max_staff`, `max_bills_per_day`, `max_bills_per_month`, `feature_waiter_app`, `feature_online_ordering`, `feature_reservations`, `feature_inventory`, `feature_expense_management`, `feature_employee_management`, `feature_kds`, `feature_analytics`, `is_active`, `is_default`, `target_type`, `sort_order`)

@@ -61,4 +61,23 @@ const upload = multer({ storage: storage });
 const billImageUpload = multer({ storage: billImageStorage });
 const menuImageUpload = multer({ storage: menuImageStorage });
 
-module.exports = { upload, billImageUpload, menuImageUpload };
+/**
+ * Extract Cloudinary public_id from a Cloudinary URL and delete the asset.
+ * Cloudinary URLs look like: https://res.cloudinary.com/<cloud>/image/upload/v123/finedyn/logos/logo_5_1711000000.jpg
+ * The public_id is everything after "upload/vXXX/" without the extension.
+ */
+async function deleteCloudinaryImage(imageUrl) {
+    if (!imageUrl || typeof imageUrl !== 'string') return;
+    try {
+        // Match Cloudinary URL pattern
+        const match = imageUrl.match(/\/upload\/(?:v\d+\/)?(finedyn\/.+?)(?:\.\w+)?$/);
+        if (!match || !match[1]) return;
+        const publicId = match[1];
+        await cloudinary.uploader.destroy(publicId);
+    } catch (err) {
+        console.error('[Cloudinary] Failed to delete image:', err.message);
+        // Non-critical — don't throw
+    }
+}
+
+module.exports = { upload, billImageUpload, menuImageUpload, deleteCloudinaryImage };

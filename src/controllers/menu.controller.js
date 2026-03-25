@@ -4,6 +4,7 @@ const { query, transaction } = require('../config/database');
 const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS } = require('../config/constants');
 const { checkLimit } = require('../utils/featureEngine');
+const { deleteCloudinaryImage } = require('../middleware/upload.middleware');
 
 // CATEGORIES
 async function getCategories(req, res) {
@@ -119,7 +120,7 @@ async function getMenuItems(req, res) {
     }
 
     const [rows] = await query(
-      `SELECT mi.*, c.name AS category_name FROM menu_items mi
+      `SELECT mi.*, c.name AS category_name, c.available_from AS category_available_from, c.available_to AS category_available_to FROM menu_items mi
        LEFT JOIN menu_categories c ON c.id = mi.category_id
        ${where} ORDER BY mi.is_featured DESC, mi.sort_order ASC, mi.name ASC`,
       params
@@ -195,6 +196,15 @@ async function updateMenuItem(req, res) {
   const { itemId } = req.params;
   const { name, description, price, categoryId, itemType, imageUrl, taxRate, preparationTime, isFeatured, isAvailable, variants, addons } = req.body;
 
+  // If a new image URL is provided, delete the old one from Cloudinary
+  if (imageUrl) {
+    const [oldRows] = await query('SELECT image_url FROM menu_items WHERE id = ? AND restaurant_id = ? LIMIT 1', [itemId, req.user.restaurantId]);
+    const oldImageUrl = oldRows?.[0]?.image_url;
+    if (oldImageUrl && oldImageUrl !== imageUrl) {
+      deleteCloudinaryImage(oldImageUrl).catch(() => {});
+    }
+  }
+
   await transaction(async (conn) => {
     const hasVariants = variants && variants.length > 0 ? 1 : 0;
     await conn.execute(
@@ -247,8 +257,13 @@ async function toggleItemAvailability(req, res) {
 
 async function deleteMenuItem(req, res) {
   const { itemId } = req.params;
-  // Use hard delete to avoid confusion, cascade handles variants/addons
+  // Delete image from Cloudinary before removing the record
+  const [oldRows] = await query('SELECT image_url FROM menu_items WHERE id = ? AND restaurant_id = ? LIMIT 1', [itemId, req.user.restaurantId]);
+  const oldImageUrl = oldRows?.[0]?.image_url;
+
   await query('DELETE FROM menu_items WHERE id = ? AND restaurant_id = ?', [itemId, req.user.restaurantId]);
+
+  if (oldImageUrl) deleteCloudinaryImage(oldImageUrl).catch(() => {});
   return success(res, null, 'Item deleted.');
 }
 
