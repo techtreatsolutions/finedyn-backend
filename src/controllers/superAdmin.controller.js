@@ -574,56 +574,63 @@ async function updateAppUpdateSettings(req, res) {
 // ── Broadcast Notification ───────────────────────────────────
 
 async function sendBroadcastNotification(req, res) {
-  const { title, message, roles, restaurantId, userId } = req.body;
+  const { title, message, roles, restaurantId, restaurantIds, userId, userIds } = req.body;
   if (!title) return error(res, 'Title is required.', HTTP_STATUS.BAD_REQUEST);
 
   const body = message || '';
   const pushData = { type: 'announcement' };
   let sentCount = 0;
 
-  // Mode 1: Send to a specific user
-  if (userId) {
-    const [userRows] = await query('SELECT id, restaurant_id FROM users WHERE id = ? AND is_active = 1 LIMIT 1', [userId]);
-    if (!userRows || userRows.length === 0) return error(res, 'User not found.', HTTP_STATUS.NOT_FOUND);
+  // Mode 1: Send to specific user(s)
+  const targetUserIds = Array.isArray(userIds) && userIds.length > 0 ? userIds : userId ? [userId] : null;
+  if (targetUserIds) {
+    for (const uid of targetUserIds) {
+      const [userRows] = await query('SELECT id, restaurant_id FROM users WHERE id = ? AND is_active = 1 LIMIT 1', [uid]);
+      if (!userRows || userRows.length === 0) continue;
 
-    await query('INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
-      [userId, 'info', title, body || null, userRows[0].restaurant_id]);
-    await sendPushToUser(userId, title, body, pushData);
-    sentCount = 1;
-    return success(res, { sentTo: 'user', userId, sentCount }, 'Notification sent to user.');
+      await query('INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
+        [uid, 'info', title, body || null, userRows[0].restaurant_id]);
+      sendPushToUser(uid, title, body, pushData).catch(() => {});
+      sentCount++;
+    }
+    return success(res, { sentTo: 'user', sentCount }, `Notification sent to ${sentCount} user(s).`);
   }
 
-  // Mode 2: Send to a specific restaurant (all users or specific roles)
-  if (restaurantId) {
+  // Mode 2: Send to specific restaurant(s) (all users or specific roles)
+  const targetRestaurantIds = Array.isArray(restaurantIds) && restaurantIds.length > 0 ? restaurantIds : restaurantId ? [restaurantId] : null;
+  if (targetRestaurantIds) {
     const selectedRoles = Array.isArray(roles) && roles.length > 0 ? roles : null;
-    let roleFilter = '';
-    const params = [restaurantId];
-    if (selectedRoles) {
-      roleFilter = ` AND u.role IN (${selectedRoles.map(() => '?').join(',')})`;
-      params.push(...selectedRoles);
-    }
 
-    const [users] = await query(
-      `SELECT u.id FROM users u WHERE u.restaurant_id = ? AND u.is_active = 1${roleFilter}`,
-      params
-    );
-
-    for (const u of (users || [])) {
-      await query('INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
-        [u.id, 'info', title, body || null, restaurantId]);
-    }
-
-    // Push: send to specific roles or entire restaurant
-    if (selectedRoles) {
-      for (const role of selectedRoles) {
-        await sendPushToRole(restaurantId, role, title, body, pushData);
+    for (const rId of targetRestaurantIds) {
+      let roleFilter = '';
+      const params = [rId];
+      if (selectedRoles) {
+        roleFilter = ` AND u.role IN (${selectedRoles.map(() => '?').join(',')})`;
+        params.push(...selectedRoles);
       }
-    } else {
-      await sendPushToRestaurant(restaurantId, title, body, pushData);
-    }
 
-    sentCount = (users || []).length;
-    return success(res, { sentTo: 'restaurant', restaurantId, sentCount }, `Notification sent to ${sentCount} user(s).`);
+      const [users] = await query(
+        `SELECT u.id FROM users u WHERE u.restaurant_id = ? AND u.is_active = 1${roleFilter}`,
+        params
+      );
+
+      for (const u of (users || [])) {
+        await query('INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
+          [u.id, 'info', title, body || null, rId]);
+      }
+
+      // Push: send to specific roles or entire restaurant
+      if (selectedRoles) {
+        for (const role of selectedRoles) {
+          sendPushToRole(rId, role, title, body, pushData).catch(() => {});
+        }
+      } else {
+        sendPushToRestaurant(rId, title, body, pushData).catch(() => {});
+      }
+
+      sentCount += (users || []).length;
+    }
+    return success(res, { sentTo: 'restaurant', sentCount }, `Notification sent to ${sentCount} user(s).`);
   }
 
   // Mode 3: Broadcast to all users globally (selected roles across all restaurants)

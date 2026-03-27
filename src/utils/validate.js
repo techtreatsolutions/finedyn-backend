@@ -50,4 +50,15 @@ function sanitizePagination(query) {
   };
 }
 
-module.exports = { sanitize, isValidEmail, isValidPhone, clampInt, isPositiveNumber, isNonNegativeNumber, isValidLength, sanitizePagination };
+// Escape HTML entities to prevent XSS in rendered output (bills, receipts, etc.)
+function sanitizeHtml(str) {
+  if (typeof str !== 'string') return str;
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+module.exports = { sanitize, sanitizeHtml, isValidEmail, isValidPhone, clampInt, isPositiveNumber, isNonNegativeNumber, isValidLength, sanitizePagination };

@@ -788,6 +788,8 @@ CREATE TABLE IF NOT EXISTS `qr_settings` (
   `enable_takeaway` TINYINT(1) NOT NULL DEFAULT 1,
   `enable_delivery` TINYINT(1) NOT NULL DEFAULT 0,
   `payment_acceptance` VARCHAR(50) NOT NULL DEFAULT 'both',
+  `require_otp` TINYINT(1) NOT NULL DEFAULT 1,
+  `is_accepting_orders` TINYINT(1) NOT NULL DEFAULT 1,
   `enable_tax` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

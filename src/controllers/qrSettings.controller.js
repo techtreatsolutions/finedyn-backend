@@ -16,22 +16,25 @@ async function getQRSettings(req, res) {
     enable_takeaway: 1,
     enable_delivery: 0,
     payment_acceptance: 'both',
+    require_otp: 1,
+    is_accepting_orders: 1,
   });
 }
 
 async function updateQRSettings(req, res) {
   const restaurantId = req.user.restaurantId;
-  const { enableDineIn, enableTakeaway, enableDelivery, paymentAcceptance } = req.body;
+  const { enableDineIn, enableTakeaway, enableDelivery, paymentAcceptance, requireOtp, isAcceptingOrders } = req.body;
 
   const validModes = ['online', 'counter', 'both'];
   const mode = validModes.includes(paymentAcceptance) ? paymentAcceptance : 'both';
 
   await query(
-    `INSERT INTO qr_settings (restaurant_id, enable_dine_in, enable_takeaway, enable_delivery, payment_acceptance)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO qr_settings (restaurant_id, enable_dine_in, enable_takeaway, enable_delivery, payment_acceptance, require_otp, is_accepting_orders)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE enable_dine_in = VALUES(enable_dine_in), enable_takeaway = VALUES(enable_takeaway),
-       enable_delivery = VALUES(enable_delivery), payment_acceptance = VALUES(payment_acceptance), updated_at = NOW()`,
-    [restaurantId, enableDineIn ? 1 : 0, enableTakeaway ? 1 : 0, enableDelivery ? 1 : 0, mode]
+       enable_delivery = VALUES(enable_delivery), payment_acceptance = VALUES(payment_acceptance),
+       require_otp = VALUES(require_otp), is_accepting_orders = VALUES(is_accepting_orders), updated_at = NOW()`,
+    [restaurantId, enableDineIn ? 1 : 0, enableTakeaway ? 1 : 0, enableDelivery ? 1 : 0, mode, requireOtp !== false ? 1 : 0, isAcceptingOrders !== false ? 1 : 0]
   );
   return success(res, null, 'QR settings saved.');
 }

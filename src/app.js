@@ -64,12 +64,7 @@ if (process.env.NODE_ENV !== 'test') app.use(morgan(process.env.NODE_ENV === 'pr
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
-// Rate limiting — only on sensitive endpoints, not globally (POS apps make thousands of requests per day)
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 15,
-  standardHeaders: true, legacyHeaders: false,
-  message: { success: false, message: 'Too many auth attempts. Try again in 15 minutes.' },
-});
+// Rate limiting
 const publicLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 60,
   standardHeaders: true, legacyHeaders: false,
@@ -89,7 +84,7 @@ app.get('/health', healthHandler);
 app.get('/api/health', healthHandler);
 
 // Routes
-app.use('/api/auth', authLimiter, authRoutes);
+app.use('/api/auth', authRoutes);
 app.use('/api/super-admin', superAdminRoutes);
 app.use('/api/restaurant', restaurantRoutes);
 app.use('/api/floors', floorRoutes);

@@ -49,7 +49,7 @@ async function getOrders(req, res) {
   const [rows] = await query(
     `SELECT o.*, t.table_number, f.name AS floor_name,
             u.name AS waiter_name, c.name AS cashier_name,
-            (SELECT SUM(amount) FROM payments WHERE order_id = o.id AND status = 'paid') AS total_collected,
+            (SELECT SUM(amount_received) FROM payments WHERE order_id = o.id AND status = 'paid') AS total_collected,
             (SELECT COUNT(*) FROM order_items WHERE order_id = o.id AND status != 'cancelled') AS item_count
      ${joinClause}
      ${where}
@@ -407,6 +407,54 @@ async function sendKOT(req, res) {
   }, 'KOT sent to kitchen.');
 }
 
+async function reprintKOT(req, res) {
+  const { orderId } = req.params;
+  const { itemIds } = req.body; // optional: specific item IDs to reprint; if empty, reprint all KOT-sent items
+
+  const [orderRows] = await query(
+    `SELECT o.order_number, o.order_type, t.table_number, f.name AS floor_name
+     FROM orders o LEFT JOIN tables t ON t.id = o.table_id LEFT JOIN floors f ON f.id = t.floor_id
+     WHERE o.id = ? AND o.restaurant_id = ? LIMIT 1`,
+    [orderId, req.user.restaurantId]
+  );
+  if (!orderRows || orderRows.length === 0) return error(res, 'Order not found.', HTTP_STATUS.NOT_FOUND);
+
+  let itemQuery, itemParams;
+  if (itemIds && itemIds.length > 0) {
+    const placeholders = itemIds.map(() => '?').join(',');
+    itemQuery = `SELECT id, item_name, quantity, notes, addon_details FROM order_items WHERE order_id = ? AND id IN (${placeholders})`;
+    itemParams = [orderId, ...itemIds];
+  } else {
+    itemQuery = "SELECT id, item_name, quantity, notes, addon_details FROM order_items WHERE order_id = ? AND kot_sent = 1";
+    itemParams = [orderId];
+  }
+
+  const [kotItems] = await query(itemQuery, itemParams);
+  if (!kotItems || kotItems.length === 0) return error(res, 'No items found for KOT reprint.', HTTP_STATUS.BAD_REQUEST);
+
+  // Merge duplicate items for display
+  const kotMap = new Map();
+  for (const item of kotItems) {
+    const addonSig = item.addon_details ? JSON.stringify(item.addon_details) : 'none';
+    const key = `${item.item_name}_${addonSig}_${item.notes || ''}`;
+    if (kotMap.has(key)) {
+      kotMap.get(key).quantity += item.quantity;
+    } else {
+      kotMap.set(key, { ...item });
+    }
+  }
+
+  return success(res, {
+    isReprint: true,
+    itemsSent: kotItems.length,
+    order_number: orderRows[0].order_number,
+    order_type: orderRows[0].order_type,
+    table_number: orderRows[0].table_number,
+    floor_name: orderRows[0].floor_name,
+    items: Array.from(kotMap.values())
+  }, 'KOT reprint data ready.');
+}
+
 /* ─── bill adjustments ─────────────────────────────────────────────────────── */
 
 async function addBillAdjustment(req, res) {
@@ -670,6 +718,11 @@ async function cancelOrder(req, res) {
       "UPDATE orders SET status = 'cancelled', notes = CONCAT(COALESCE(notes, ''), ?) WHERE id = ?",
       [reason ? ` | Cancelled: ${reason}` : ' | Cancelled', orderId]
     );
+    // Mark all order items as cancelled so they are removed from KDS
+    await conn.execute(
+      "UPDATE order_items SET status = 'cancelled' WHERE order_id = ? AND status NOT IN ('served', 'cancelled')",
+      [orderId]
+    );
     if (order.table_id) {
       const edineOn = await checkFeature(req.user.restaurantId, 'feature_edine_in_orders');
       const newPin = edineOn ? generateTablePin() : null;
@@ -695,20 +748,22 @@ async function cancelOrder(req, res) {
 /* ─── kitchen display ──────────────────────────────────────────────────────── */
 
 async function getKitchenOrders(req, res) {
-  // Fetch active orders (no aggregation — works on all MySQL/MariaDB versions)
+  // Fetch orders from the last 24 hours that are NOT cancelled and have KOT items
+  // Items from paid/closed orders still show until manually marked as served
   const [orders] = await query(
-    `SELECT o.id, o.order_number, o.order_type, o.created_at,
+    `SELECT o.id, o.order_number, o.order_type, o.status AS order_status, o.created_at,
             t.table_number, f.name AS floor_name
      FROM orders o
      LEFT JOIN tables t ON t.id = o.table_id
      LEFT JOIN floors f ON f.id = t.floor_id
-     WHERE o.restaurant_id = ? AND o.status NOT IN ('completed', 'cancelled')
+     WHERE o.restaurant_id = ? AND o.status != 'cancelled'
+       AND o.created_at >= NOW() - INTERVAL 24 HOUR
      ORDER BY o.created_at ASC`,
     [req.user.restaurantId]
   );
   if (!orders || orders.length === 0) return success(res, []);
 
-  // Fetch items sent to kitchen (pending/preparing/ready) in one query
+  // Fetch items sent to kitchen (pending/preparing/ready) — excludes served & cancelled items
   const orderIds = orders.map(o => o.id);
   const placeholders = orderIds.map(() => '?').join(',');
   const [items] = await query(
@@ -716,12 +771,13 @@ async function getKitchenOrders(req, res) {
             oi.addon_details, mi.preparation_time
      FROM order_items oi
      LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
-     WHERE oi.order_id IN (${placeholders}) AND oi.kot_sent = 1 AND oi.status IN ('pending', 'preparing', 'ready')
+     WHERE oi.order_id IN (${placeholders}) AND oi.kot_sent = 1
+       AND oi.status IN ('pending', 'preparing', 'ready')
      ORDER BY oi.created_at ASC`,
     orderIds
   );
 
-  // Group items by order and filter out orders with no pending items
+  // Group items by order and filter out orders with no active kitchen items
   const itemMap = {};
   for (const item of items) {
     if (!itemMap[item.order_id]) itemMap[item.order_id] = [];
@@ -1043,11 +1099,6 @@ async function sendEBill(req, res) {
     // Determine token cost based on mode
     const tokenCost = waMode === 1 ? 1 : waMode === 2 ? 3.5 : 4.5;
 
-    // Check WA token balance
-    if (!restRows[0].wa_tokens || restRows[0].wa_tokens < tokenCost) {
-      return error(res, 'Insufficient WA messaging tokens in your account. Please recharge the tokens.', HTTP_STATUS.BAD_REQUEST);
-    }
-
     // Validate Google Review URL for modes 2 & 3
     if (waMode > 1 && !googleReviewUrl) {
       return error(res, 'Google Maps Review URL not configured. Update it in Settings > WA Messaging.', HTTP_STATUS.BAD_REQUEST);
@@ -1095,6 +1146,15 @@ async function sendEBill(req, res) {
     const [freshOrder] = await query('SELECT total_amount FROM orders WHERE id = ?', [orderId]);
     const totalAmount = freshOrder[0]?.total_amount || order.total_amount;
 
+    // Atomically deduct tokens BEFORE sending messages to prevent race condition
+    const [deductResult] = await query(
+      'UPDATE restaurants SET wa_tokens = wa_tokens - ? WHERE id = ? AND wa_tokens >= ?',
+      [tokenCost, restaurantId, tokenCost]
+    );
+    if (!deductResult || deductResult.affectedRows === 0) {
+      return error(res, 'Insufficient WA messaging tokens in your account. Please recharge the tokens.', HTTP_STATUS.BAD_REQUEST);
+    }
+
     // Build e-bill URL
     const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0].trim();
     const ebillUrl = `${frontendUrl}/ebill/${ebillToken}`;
@@ -1102,23 +1162,23 @@ async function sendEBill(req, res) {
     const customerName = order.customer_name || 'Customer';
 
     // Send message(s) based on WA messaging mode
-    if (waMode === 1) {
-      // Mode 1: E-bill only (1 token)
-      const variables = [customerName, order.restaurant_name, order.order_number || String(orderId), Number(totalAmount).toFixed(2), ebillUrl];
-      await sendWhatsAppInvoice(order.customer_phone, variables);
-    } else if (waMode === 2) {
-      // Mode 2: E-bill + Review in same message (3.5 tokens)
-      const variables = [customerName, order.restaurant_name, order.order_number || String(orderId), Number(totalAmount).toFixed(2), ebillUrl, googleReviewUrl];
-      await sendWhatsAppInvoiceReview(order.customer_phone, variables);
-    } else if (waMode === 3) {
-      // Mode 3: E-bill + Review as separate messages (4.5 tokens)
-      const invoiceVars = [customerName, order.restaurant_name, order.order_number || String(orderId), Number(totalAmount).toFixed(2), ebillUrl];
-      await sendWhatsAppInvoice(order.customer_phone, invoiceVars);
-      await sendWhatsAppReview(order.customer_phone, googleReviewUrl);
+    try {
+      if (waMode === 1) {
+        const variables = [customerName, order.restaurant_name, order.order_number || String(orderId), Number(totalAmount).toFixed(2), ebillUrl];
+        await sendWhatsAppInvoice(order.customer_phone, variables);
+      } else if (waMode === 2) {
+        const variables = [customerName, order.restaurant_name, order.order_number || String(orderId), Number(totalAmount).toFixed(2), ebillUrl, googleReviewUrl];
+        await sendWhatsAppInvoiceReview(order.customer_phone, variables);
+      } else if (waMode === 3) {
+        const invoiceVars = [customerName, order.restaurant_name, order.order_number || String(orderId), Number(totalAmount).toFixed(2), ebillUrl];
+        await sendWhatsAppInvoice(order.customer_phone, invoiceVars);
+        await sendWhatsAppReview(order.customer_phone, googleReviewUrl);
+      }
+    } catch (sendErr) {
+      // Refund tokens if message sending fails
+      await query('UPDATE restaurants SET wa_tokens = wa_tokens + ? WHERE id = ?', [tokenCost, restaurantId]);
+      throw sendErr;
     }
-
-    // Deduct tokens based on mode
-    await query('UPDATE restaurants SET wa_tokens = wa_tokens - ? WHERE id = ? AND wa_tokens >= ?', [tokenCost, restaurantId, tokenCost]);
 
     return success(res, { ebillUrl }, 'E-bill sent successfully via WhatsApp.');
   } catch (err) {
@@ -1256,6 +1316,7 @@ module.exports = {
   updateOrderItem,
   removeOrderItem,
   sendKOT,
+  reprintKOT,
   markOrderPaid,
   generateBill,
   updateOrderCustomer,

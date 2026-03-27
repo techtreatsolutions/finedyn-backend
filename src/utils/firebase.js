@@ -36,7 +36,14 @@ initFirebase();
  * Send push notification to a single FCM token.
  */
 async function sendPush(fcmToken, title, body, data = {}) {
-  if (!firebaseInitialized) return null;
+  if (!firebaseInitialized) {
+    console.warn('[Firebase] Push skipped — SDK not initialized.');
+    return null;
+  }
+  if (!fcmToken) {
+    console.warn('[Firebase] Push skipped — no FCM token provided.');
+    return null;
+  }
 
   try {
     const message = {
@@ -66,6 +73,7 @@ async function sendPush(fcmToken, title, body, data = {}) {
       },
     };
     const response = await admin.messaging().send(message);
+    console.log(`[Firebase] Push sent: "${title}" → token:${fcmToken.substring(0, 12)}...`);
     return response;
   } catch (err) {
     // If token is invalid/expired, deactivate it
@@ -73,7 +81,10 @@ async function sendPush(fcmToken, title, body, data = {}) {
       err.code === 'messaging/invalid-registration-token' ||
       err.code === 'messaging/registration-token-not-registered'
     ) {
+      console.warn(`[Firebase] Deactivating invalid token: ${fcmToken.substring(0, 12)}...`);
       await query('UPDATE device_tokens SET is_active = 0 WHERE fcm_token = ?', [fcmToken]);
+    } else {
+      console.error(`[Firebase] Push failed for "${title}":`, err.code || err.message);
     }
     return null;
   }
@@ -90,11 +101,15 @@ async function sendPushToUser(userId, title, body, data = {}) {
       'SELECT fcm_token FROM device_tokens WHERE user_id = ? AND is_active = 1',
       [userId]
     );
-    if (!tokens || tokens.length === 0) return;
+    if (!tokens || tokens.length === 0) {
+      console.log(`[Firebase] No active tokens for user ${userId}`);
+      return;
+    }
 
+    console.log(`[Firebase] Sending "${title}" to user ${userId} (${tokens.length} device(s))`);
     const promises = tokens.map(t => sendPush(t.fcm_token, title, body, data));
     await Promise.allSettled(promises);
-  } catch (_) { /* non-critical */ }
+  } catch (err) { console.error('[Firebase] sendPushToUser error:', err.message); }
 }
 
 /**
@@ -107,14 +122,19 @@ async function sendPushToRole(restaurantId, role, title, body, data = {}) {
     const [tokens] = await query(
       `SELECT dt.fcm_token FROM device_tokens dt
        JOIN users u ON u.id = dt.user_id
-       WHERE dt.restaurant_id = ? AND u.role = ? AND dt.is_active = 1 AND u.is_active = 1`,
-      [restaurantId, role]
+       WHERE (dt.restaurant_id = ? OR (dt.restaurant_id IS NULL AND u.restaurant_id = ?))
+         AND u.role = ? AND dt.is_active = 1 AND u.is_active = 1`,
+      [restaurantId, restaurantId, role]
     );
-    if (!tokens || tokens.length === 0) return;
+    if (!tokens || tokens.length === 0) {
+      console.log(`[Firebase] No active tokens for role "${role}" in restaurant ${restaurantId}`);
+      return;
+    }
 
+    console.log(`[Firebase] Sending "${title}" to ${tokens.length} ${role}(s) in restaurant ${restaurantId}`);
     const promises = tokens.map(t => sendPush(t.fcm_token, title, body, data));
     await Promise.allSettled(promises);
-  } catch (_) { /* non-critical */ }
+  } catch (err) { console.error('[Firebase] sendPushToRole error:', err.message); }
 }
 
 /**
@@ -127,14 +147,19 @@ async function sendPushToAdmins(restaurantId, title, body, data = {}) {
     const [tokens] = await query(
       `SELECT dt.fcm_token FROM device_tokens dt
        JOIN users u ON u.id = dt.user_id
-       WHERE dt.restaurant_id = ? AND u.role IN ('owner', 'manager') AND dt.is_active = 1 AND u.is_active = 1`,
-      [restaurantId]
+       WHERE (dt.restaurant_id = ? OR (dt.restaurant_id IS NULL AND u.restaurant_id = ?))
+         AND u.role IN ('owner', 'manager') AND dt.is_active = 1 AND u.is_active = 1`,
+      [restaurantId, restaurantId]
     );
-    if (!tokens || tokens.length === 0) return;
+    if (!tokens || tokens.length === 0) {
+      console.log(`[Firebase] No active tokens for admins in restaurant ${restaurantId}`);
+      return;
+    }
 
+    console.log(`[Firebase] Sending "${title}" to ${tokens.length} admin(s) in restaurant ${restaurantId}`);
     const promises = tokens.map(t => sendPush(t.fcm_token, title, body, data));
     await Promise.allSettled(promises);
-  } catch (_) { /* non-critical */ }
+  } catch (err) { console.error('[Firebase] sendPushToAdmins error:', err.message); }
 }
 
 /**
@@ -146,14 +171,17 @@ async function sendPushToRestaurant(restaurantId, title, body, data = {}) {
   try {
     const [tokens] = await query(
       `SELECT dt.fcm_token FROM device_tokens dt
-       WHERE dt.restaurant_id = ? AND dt.is_active = 1`,
-      [restaurantId]
+       LEFT JOIN users u ON u.id = dt.user_id
+       WHERE (dt.restaurant_id = ? OR (dt.restaurant_id IS NULL AND u.restaurant_id = ?))
+         AND dt.is_active = 1`,
+      [restaurantId, restaurantId]
     );
     if (!tokens || tokens.length === 0) return;
 
+    console.log(`[Firebase] Sending "${title}" to ${tokens.length} device(s) in restaurant ${restaurantId}`);
     const promises = tokens.map(t => sendPush(t.fcm_token, title, body, data));
     await Promise.allSettled(promises);
-  } catch (_) { /* non-critical */ }
+  } catch (err) { console.error('[Firebase] sendPushToRestaurant error:', err.message); }
 }
 
 /**

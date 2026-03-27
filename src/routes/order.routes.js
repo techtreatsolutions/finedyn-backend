@@ -29,6 +29,7 @@ router.put('/:orderId/items/:itemId', ...auth, ctrl.updateOrderItem);
 router.delete('/:orderId/items/:itemId', ...auth, ctrl.removeOrderItem);
 
 router.post('/:orderId/kot', ...auth, ctrl.sendKOT);
+router.post('/:orderId/kot/reprint', ...auth, ctrl.reprintKOT);
 router.post('/:orderId/adjustments', ...auth, ctrl.addBillAdjustment);
 router.delete('/:orderId/adjustments/:adjustmentId', ...auth, ctrl.removeBillAdjustment);
 

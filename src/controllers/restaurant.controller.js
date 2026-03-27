@@ -101,7 +101,7 @@ async function getDashboardStats(req, res) {
 
     query(`SELECT LOWER(p.payment_mode) AS payment_mode, COALESCE(SUM(p.amount), 0) AS total
       FROM payments p
-      WHERE p.restaurant_id = ? AND p.status = 'success' AND DATE(p.created_at) = CURDATE()
+      WHERE p.restaurant_id = ? AND p.status = 'paid' AND DATE(p.created_at) = CURDATE()
       GROUP BY LOWER(p.payment_mode)`, [rId]),
   ]);
 

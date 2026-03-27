@@ -66,6 +66,16 @@ async function notifyKitchenStaff(restaurantId, title, message) {
 /* ── Helper: notify waiters of a restaurant (order ready) ── */
 async function notifyWaiters(restaurantId, title, message) {
   try {
+    const [waiters] = await query(
+      "SELECT id FROM users WHERE restaurant_id = ? AND role = 'waiter' AND is_active = 1",
+      [restaurantId]
+    );
+    for (const w of (waiters || [])) {
+      await query(
+        'INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
+        [w.id, 'order', title, message || null, restaurantId]
+      );
+    }
     sendPushToRole(restaurantId, 'waiter', title, message || '', { type: 'order_ready' }).catch(() => {});
   } catch (_) { /* non-critical */ }
 }

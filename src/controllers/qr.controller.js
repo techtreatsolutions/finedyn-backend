@@ -12,6 +12,7 @@ const { requestOTP, verifyOTP } = require('../utils/whatsappOtp');
 const { decrypt } = require('../utils/encryption');
 const { notifyRestaurantOwner } = require('./notification.controller');
 const { sendPushToRole, sendPushToUser } = require('../utils/firebase');
+const { sanitizeHtml } = require('../utils/validate');
 
 /**
  * Initiate a refund for a given payment via the restaurant's active gateway.
@@ -302,10 +303,15 @@ async function validateSession(req, res) {
 async function placeQROrder(req, res) {
   try {
     const { restaurantSlug, tableId } = req.params;
-    const { sessionToken, customerName, customerPhone, items, specialInstructions } = req.body;
+    const { sessionToken, customerName: rawName, customerPhone, items, specialInstructions: rawInstructions } = req.body;
+    const customerName = sanitizeHtml(rawName);
+    const specialInstructions = sanitizeHtml(rawInstructions);
 
     if (!sessionToken) return error(res, 'Session token is required.', HTTP_STATUS.BAD_REQUEST);
     if (!items || !items.length) return error(res, 'Items are required.', HTTP_STATUS.BAD_REQUEST);
+    if (!customerPhone || customerPhone.replace(/\D/g, '').length < 10) {
+      return error(res, 'A valid mobile number is required to place an order.', HTTP_STATUS.BAD_REQUEST);
+    }
 
     // Lookup restaurant
     const [rRows] = await query(
@@ -783,7 +789,7 @@ async function getQRRestaurantInfo(req, res) {
 
     // Fetch QR settings
     const [qsRows] = await query('SELECT * FROM qr_settings WHERE restaurant_id = ? LIMIT 1', [restaurant.id]);
-    const qrSettings = qsRows && qsRows.length > 0 ? qsRows[0] : { enable_dine_in: 1, enable_takeaway: 1, enable_delivery: 0, payment_acceptance: 'both' };
+    const qrSettings = qsRows && qsRows.length > 0 ? qsRows[0] : { enable_dine_in: 1, enable_takeaway: 1, enable_delivery: 0, payment_acceptance: 'both', is_accepting_orders: 1 };
 
     // Tax toggle comes from bill_format_settings (the single source of truth)
     const [bfTaxRows] = await query('SELECT enable_tax FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1', [restaurant.id]);
@@ -804,6 +810,8 @@ async function getQRRestaurantInfo(req, res) {
         enableTakeaway: !!qrSettings.enable_takeaway,
         enableDelivery: !!qrSettings.enable_delivery,
         paymentAcceptance: qrSettings.payment_acceptance,
+        requireOtp: qrSettings.require_otp !== undefined ? !!qrSettings.require_otp : true,
+        isAcceptingOrders: qrSettings.is_accepting_orders !== undefined ? !!qrSettings.is_accepting_orders : true,
         enableTax,
       },
       hasPaymentGateway,
@@ -867,10 +875,16 @@ async function getQRTableInfo(req, res) {
 async function placeQRModelOrder(req, res) {
   try {
     const { restaurantSlug } = req.params;
-    const { orderType, tableId, customerName, customerPhone, deliveryAddress, items, specialInstructions, paymentPreference, razorpayOrderId, razorpayPaymentId } = req.body;
+    const { orderType, tableId, customerName: rawName2, customerPhone, deliveryAddress: rawAddress, items, specialInstructions: rawInstructions2, paymentPreference, razorpayOrderId, razorpayPaymentId } = req.body;
+    const customerName = sanitizeHtml(rawName2);
+    const deliveryAddress = sanitizeHtml(rawAddress);
+    const specialInstructions = sanitizeHtml(rawInstructions2);
 
     if (!items || !items.length) return error(res, 'Items are required.', HTTP_STATUS.BAD_REQUEST);
     if (!orderType) return error(res, 'Order type is required.', HTTP_STATUS.BAD_REQUEST);
+    if (!customerPhone || customerPhone.replace(/\D/g, '').length < 10) {
+      return error(res, 'A valid mobile number is required to place an order.', HTTP_STATUS.BAD_REQUEST);
+    }
 
     const [rRows] = await query('SELECT id FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
     if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
@@ -878,7 +892,12 @@ async function placeQRModelOrder(req, res) {
 
     // Validate order type against QR settings
     const [qsRows] = await query('SELECT * FROM qr_settings WHERE restaurant_id = ? LIMIT 1', [restaurantId]);
-    const qs = qsRows && qsRows.length > 0 ? qsRows[0] : { enable_dine_in: 1, enable_takeaway: 1, enable_delivery: 0, payment_acceptance: 'both' };
+    const qs = qsRows && qsRows.length > 0 ? qsRows[0] : { enable_dine_in: 1, enable_takeaway: 1, enable_delivery: 0, payment_acceptance: 'both', is_accepting_orders: 1 };
+
+    // Block orders if restaurant has turned off ordering
+    if (qs.is_accepting_orders !== undefined && !qs.is_accepting_orders) {
+      return error(res, 'This restaurant is currently not accepting orders. You can still browse the menu.', HTTP_STATUS.BAD_REQUEST);
+    }
 
     // Tax toggle from bill_format_settings (single source of truth)
     const [bfTaxRows2] = await query('SELECT enable_tax FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1', [restaurantId]);
@@ -895,8 +914,9 @@ async function placeQRModelOrder(req, res) {
     // Determine payment preference
     const pref = paymentPreference === 'online' ? 'online' : 'counter';
 
-    // For counter payment, phone must be verified via OTP
-    if (pref === 'counter') {
+    // For counter payment, phone is required only when OTP verification is enabled
+    const requireOtp = qs.require_otp !== undefined ? !!qs.require_otp : true;
+    if (pref === 'counter' && requireOtp) {
       if (!customerPhone) return error(res, 'Phone number is required for pay-at-counter orders.', HTTP_STATUS.BAD_REQUEST);
     }
 
@@ -966,13 +986,19 @@ async function placeQRModelOrder(req, res) {
     const itemCount = enrichedItems.reduce((s, i) => s + i.quantity, 0);
     let pushBody = `${orderType === 'dine_in' ? 'Dine-in' : orderType === 'takeaway' ? 'Takeaway' : 'Delivery'} — ${itemCount} item${itemCount > 1 ? 's' : ''}`;
     if (customerName) pushBody += ` by ${customerName}`;
+    let assignedWaiterId = null;
     if (orderType === 'dine_in' && tableId) {
-      const [tblR] = await query('SELECT table_number FROM tables WHERE id = ? LIMIT 1', [tableId]);
+      const [tblR] = await query('SELECT table_number, assigned_waiter_id FROM tables WHERE id = ? LIMIT 1', [tableId]);
       if (tblR?.[0]?.table_number) pushBody = `Table ${tblR[0].table_number} — ${pushBody}`;
+      assignedWaiterId = tblR?.[0]?.assigned_waiter_id || null;
     }
     const pushData = { type: 'new_qr_order', qrOrderId: String(result.insertId), restaurantId: String(restaurantId) };
     notifyRestaurantOwner(restaurantId, 'new_qr_order', 'New QR Order', pushBody).catch(() => {});
     sendPushToRole(restaurantId, 'cashier', 'New QR Order', pushBody, pushData).catch(() => {});
+    // Notify assigned waiter
+    if (assignedWaiterId) {
+      sendPushToUser(assignedWaiterId, 'New QR Order', pushBody, pushData).catch(() => {});
+    }
 
     return success(res, { qrOrderId: result.insertId }, 'Order placed! Waiting for restaurant confirmation.', HTTP_STATUS.CREATED);
   } catch (err) {
@@ -991,6 +1017,12 @@ async function createQRPayment(req, res) {
     const [rRows] = await query('SELECT id FROM restaurants WHERE slug = ? AND is_active = 1 LIMIT 1', [restaurantSlug]);
     if (!rRows || rRows.length === 0) return error(res, 'Restaurant not found.', HTTP_STATUS.NOT_FOUND);
     const restaurantId = rRows[0].id;
+
+    // Block payment creation if restaurant is not accepting orders
+    const [qsPayRows] = await query('SELECT is_accepting_orders FROM qr_settings WHERE restaurant_id = ? LIMIT 1', [restaurantId]);
+    if (qsPayRows && qsPayRows.length > 0 && !qsPayRows[0].is_accepting_orders) {
+      return error(res, 'This restaurant is currently not accepting orders.', HTTP_STATUS.BAD_REQUEST);
+    }
 
     // Tax toggle from bill_format_settings (single source of truth)
     const [bfTaxRows] = await query('SELECT enable_tax FROM bill_format_settings WHERE restaurant_id = ? LIMIT 1', [restaurantId]);

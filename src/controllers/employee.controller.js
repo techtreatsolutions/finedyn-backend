@@ -209,7 +209,7 @@ async function processSalary(req, res) {
 async function deductFromPendingRecords(conn, employeeId, restaurantId, type, amount, salaryId) {
   const [rows] = await conn.execute(
     `SELECT id, remaining FROM employee_advances
-     WHERE employee_id = ? AND restaurant_id = ? AND type = ? AND status = 'pending' AND remaining > 0
+     WHERE employee_id = ? AND restaurant_id = ? AND type = ? AND status IN ('active', 'pending') AND remaining > 0
      ORDER BY date ASC`,
     [employeeId, restaurantId, type]
   );
@@ -359,7 +359,7 @@ async function getPendingAdvanceSummary(req, res) {
        COALESCE(SUM(CASE WHEN type = 'advance' THEN remaining ELSE 0 END), 0) AS total_advances,
        COALESCE(SUM(CASE WHEN type = 'outstanding' THEN remaining ELSE 0 END), 0) AS total_outstanding
      FROM employee_advances
-     WHERE employee_id = ? AND restaurant_id = ? AND status = 'pending'`,
+     WHERE employee_id = ? AND restaurant_id = ? AND status IN ('active', 'pending') AND remaining > 0`,
     [employeeId, req.user.restaurantId]
   );
   return success(res, rows[0]);
