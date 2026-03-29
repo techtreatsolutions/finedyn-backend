@@ -5,6 +5,24 @@ const { success, error } = require('../utils/responseHelper');
 const { HTTP_STATUS } = require('../config/constants');
 const { isNonNegativeNumber } = require('../utils/validate');
 
+/* ─── auto-migration: ensure adjustment_details column exists ──────────────── */
+let _adjColEnsured = false;
+async function ensureAdjustmentDetailsColumn() {
+  if (_adjColEnsured) return;
+  try {
+    const [rows] = await query(
+      `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'salary_records' AND COLUMN_NAME = 'adjustment_details' LIMIT 1`
+    );
+    if (!rows || rows.length === 0) {
+      await query('ALTER TABLE salary_records ADD COLUMN adjustment_details JSON DEFAULT NULL AFTER net_salary');
+    }
+    _adjColEnsured = true;
+  } catch (e) {
+    _adjColEnsured = true; // Don't retry on error
+  }
+}
+
 /* ─── employees ────────────────────────────────────────────────────────────── */
 
 async function getEmployees(req, res) {
@@ -183,20 +201,32 @@ async function processSalary(req, res) {
   const adjAdvances = parseFloat(adjustAdvances || 0);
   const adjOutstanding = parseFloat(adjustOutstanding || 0);
 
+  // Ensure adjustment_details column exists (safe for existing DBs)
+  await ensureAdjustmentDetailsColumn();
+
   const result = await transaction(async (conn) => {
     const [insertRes] = await conn.execute(
-      `INSERT INTO salary_records (employee_id, restaurant_id, month, year, base_salary, basic_salary, bonuses, adjusted_advances, adjusted_outstanding, deductions, net_salary, payment_date, notes, paid_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [employeeId, req.user.restaurantId, month, year, basicSalary, basicSalary, bonuses || 0, adjAdvances, adjOutstanding, deductions || 0, netSalary, paymentDate || null, notes || null, req.user.id]
+      `INSERT INTO salary_records (employee_id, restaurant_id, month, year, base_salary, basic_salary, bonuses, adjusted_advances, adjusted_outstanding, deductions, net_salary, adjustment_details, payment_date, notes, paid_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [employeeId, req.user.restaurantId, month, year, basicSalary, basicSalary, bonuses || 0, adjAdvances, adjOutstanding, deductions || 0, netSalary, null, paymentDate || null, notes || null, req.user.id]
     );
     const salaryId = insertRes.insertId;
 
-    // Partially deduct from pending advance records (FIFO by date)
+    // Partially deduct from pending advance records (FIFO by date) and track details
+    const adjDetails = { advances: [], outstanding: [] };
     if (adjAdvances > 0) {
-      await deductFromPendingRecords(conn, employeeId, req.user.restaurantId, 'advance', adjAdvances, salaryId);
+      adjDetails.advances = await deductFromPendingRecords(conn, employeeId, req.user.restaurantId, 'advance', adjAdvances, salaryId);
     }
     if (adjOutstanding > 0) {
-      await deductFromPendingRecords(conn, employeeId, req.user.restaurantId, 'outstanding', adjOutstanding, salaryId);
+      adjDetails.outstanding = await deductFromPendingRecords(conn, employeeId, req.user.restaurantId, 'outstanding', adjOutstanding, salaryId);
+    }
+
+    // Store deduction details for reversal on delete
+    if (adjDetails.advances.length > 0 || adjDetails.outstanding.length > 0) {
+      await conn.execute(
+        'UPDATE salary_records SET adjustment_details = ? WHERE id = ?',
+        [JSON.stringify(adjDetails), salaryId]
+      );
     }
 
     return { id: salaryId, netSalary };
@@ -206,6 +236,7 @@ async function processSalary(req, res) {
 }
 
 // Helper: partially deduct amount from pending advance/outstanding records (FIFO)
+// Returns array of { id, deducted } for reversal tracking
 async function deductFromPendingRecords(conn, employeeId, restaurantId, type, amount, salaryId) {
   const [rows] = await conn.execute(
     `SELECT id, remaining FROM employee_advances
@@ -215,11 +246,14 @@ async function deductFromPendingRecords(conn, employeeId, restaurantId, type, am
   );
 
   let left = amount;
+  const details = [];
   for (const record of (rows || [])) {
     if (left <= 0) break;
     const recRemaining = parseFloat(record.remaining);
     const deduct = Math.min(left, recRemaining);
     const newRemaining = recRemaining - deduct;
+
+    details.push({ id: record.id, deducted: deduct });
 
     if (newRemaining <= 0) {
       await conn.execute(
@@ -234,6 +268,7 @@ async function deductFromPendingRecords(conn, employeeId, restaurantId, type, am
     }
     left -= deduct;
   }
+  return details;
 }
 
 async function updateSalary(req, res) {
@@ -257,10 +292,60 @@ async function updateSalary(req, res) {
 
 async function deleteSalary(req, res) {
   const { employeeId, salaryId } = req.params;
-  const [rows] = await query('SELECT id FROM salary_records WHERE id = ? AND employee_id = ? AND restaurant_id = ? LIMIT 1', [salaryId, employeeId, req.user.restaurantId]);
+  const [rows] = await query('SELECT * FROM salary_records WHERE id = ? AND employee_id = ? AND restaurant_id = ? LIMIT 1', [salaryId, employeeId, req.user.restaurantId]);
   if (!rows || rows.length === 0) return error(res, 'Salary record not found.', HTTP_STATUS.NOT_FOUND);
-  await query('DELETE FROM salary_records WHERE id = ? AND employee_id = ? AND restaurant_id = ?', [salaryId, employeeId, req.user.restaurantId]);
-  return success(res, null, 'Salary record deleted.');
+
+  const salaryRecord = rows[0];
+  const adjAdvances = parseFloat(salaryRecord.adjusted_advances) || 0;
+  const adjOutstanding = parseFloat(salaryRecord.adjusted_outstanding) || 0;
+
+  await transaction(async (conn) => {
+    // Reverse advance/outstanding adjustments
+    if (adjAdvances > 0 || adjOutstanding > 0) {
+      await reverseAdjustments(conn, employeeId, req.user.restaurantId, salaryId, salaryRecord);
+    }
+
+    // Delete the salary record
+    await conn.execute(
+      'DELETE FROM salary_records WHERE id = ? AND employee_id = ? AND restaurant_id = ?',
+      [salaryId, employeeId, req.user.restaurantId]
+    );
+  });
+
+  return success(res, null, 'Salary record deleted and adjustments reversed.');
+}
+
+// Reverse advance/outstanding adjustments when a salary slip is deleted
+async function reverseAdjustments(conn, employeeId, restaurantId, salaryId, salaryRecord) {
+  let details = null;
+  try {
+    details = salaryRecord.adjustment_details;
+    if (typeof details === 'string') details = JSON.parse(details);
+  } catch (e) { details = null; }
+
+  if (details && (details.advances?.length || details.outstanding?.length)) {
+    // Precise reversal using stored deduction details
+    for (const entry of (details.advances || [])) {
+      await conn.execute(
+        `UPDATE employee_advances SET remaining = remaining + ?, status = IF(remaining + ? >= amount, 'active', status), adjusted_in_salary_id = IF(adjusted_in_salary_id = ?, NULL, adjusted_in_salary_id) WHERE id = ? AND employee_id = ?`,
+        [entry.deducted, entry.deducted, salaryId, entry.id, employeeId]
+      );
+    }
+    for (const entry of (details.outstanding || [])) {
+      await conn.execute(
+        `UPDATE employee_advances SET remaining = remaining + ?, status = IF(remaining + ? >= amount, 'active', status), adjusted_in_salary_id = IF(adjusted_in_salary_id = ?, NULL, adjusted_in_salary_id) WHERE id = ? AND employee_id = ?`,
+        [entry.deducted, entry.deducted, salaryId, entry.id, employeeId]
+      );
+    }
+  } else {
+    // Fallback for old salary records without adjustment_details:
+    // Restore fully adjusted records linked to this salary
+    await conn.execute(
+      `UPDATE employee_advances SET remaining = amount, status = 'active', adjusted_in_salary_id = NULL
+       WHERE adjusted_in_salary_id = ? AND employee_id = ? AND restaurant_id = ?`,
+      [salaryId, employeeId, restaurantId]
+    );
+  }
 }
 
 async function updateSalaryStatus(req, res) {
@@ -346,7 +431,18 @@ async function deleteAdvance(req, res) {
   const { advanceId } = req.params;
   const [rows] = await query('SELECT * FROM employee_advances WHERE id = ? AND restaurant_id = ? LIMIT 1', [advanceId, req.user.restaurantId]);
   if (!rows || rows.length === 0) return error(res, 'Record not found.', HTTP_STATUS.NOT_FOUND);
-  if (rows[0].status === 'adjusted') return error(res, 'Cannot delete an adjusted advance.', HTTP_STATUS.BAD_REQUEST);
+
+  const record = rows[0];
+  const adjusted = parseFloat(record.amount) - parseFloat(record.remaining);
+
+  // If partially or fully adjusted, update the linked salary record's adjusted amount
+  if (adjusted > 0 && record.adjusted_in_salary_id) {
+    const col = record.type === 'advance' ? 'adjusted_advances' : 'adjusted_outstanding';
+    await query(
+      `UPDATE salary_records SET ${col} = GREATEST(0, ${col} - ?) WHERE id = ?`,
+      [adjusted, record.adjusted_in_salary_id]
+    );
+  }
 
   await query('DELETE FROM employee_advances WHERE id = ? AND restaurant_id = ?', [advanceId, req.user.restaurantId]);
   return success(res, null, 'Record deleted.');

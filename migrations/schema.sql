@@ -606,6 +606,7 @@ CREATE TABLE IF NOT EXISTS `salary_records` (
   `payment_date` DATE,
   `notes` TEXT,
   `basic_salary` DECIMAL(10,2),
+  `adjustment_details` JSON DEFAULT NULL,
   `paid_by` INT,
   `created_by` INT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

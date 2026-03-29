@@ -27,18 +27,18 @@ async function notifySuperAdmins(type, title, message, restaurantId = null) {
   } catch (_) { /* non-critical */ }
 }
 
-/* ── Helper: notify owner of a restaurant ── */
+/* ── Helper: notify owner + manager of a restaurant ── */
 async function notifyRestaurantOwner(restaurantId, type, title, message) {
   try {
-    // Insert DB notifications for owners
-    const [owners] = await query(
-      "SELECT id FROM users WHERE restaurant_id = ? AND role = 'owner' AND is_active = 1",
+    // Insert DB notifications for owners AND managers
+    const [admins] = await query(
+      "SELECT id FROM users WHERE restaurant_id = ? AND role IN ('owner', 'manager') AND is_active = 1",
       [restaurantId]
     );
-    for (const owner of (owners || [])) {
+    for (const admin of (admins || [])) {
       await query(
         'INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
-        [owner.id, type, title, message || null, restaurantId]
+        [admin.id, type, title, message || null, restaurantId]
       );
     }
     // Send push to all admins (owner + manager) — single push per device
@@ -64,19 +64,38 @@ async function notifyKitchenStaff(restaurantId, title, message) {
 }
 
 /* ── Helper: notify waiters of a restaurant (order ready) ── */
-async function notifyWaiters(restaurantId, title, message) {
+/* If tableId is provided, only the waiter assigned to that table is notified */
+async function notifyWaiters(restaurantId, title, message, tableId) {
   try {
-    const [waiters] = await query(
-      "SELECT id FROM users WHERE restaurant_id = ? AND role = 'waiter' AND is_active = 1",
-      [restaurantId]
-    );
-    for (const w of (waiters || [])) {
+    let targetWaiterIds = [];
+
+    if (tableId) {
+      // Look up the assigned waiter for this table
+      const [tableRows] = await query(
+        'SELECT assigned_waiter_id FROM tables WHERE id = ? AND restaurant_id = ?',
+        [tableId, restaurantId]
+      );
+      if (tableRows && tableRows.length > 0 && tableRows[0].assigned_waiter_id) {
+        targetWaiterIds = [tableRows[0].assigned_waiter_id];
+      }
+    }
+
+    // Fallback: if no table or no assigned waiter, notify all waiters
+    if (targetWaiterIds.length === 0) {
+      const [waiters] = await query(
+        "SELECT id FROM users WHERE restaurant_id = ? AND role = 'waiter' AND is_active = 1",
+        [restaurantId]
+      );
+      targetWaiterIds = (waiters || []).map(w => w.id);
+    }
+
+    for (const wId of targetWaiterIds) {
       await query(
         'INSERT INTO notifications (user_id, type, title, message, restaurant_id) VALUES (?, ?, ?, ?, ?)',
-        [w.id, 'order', title, message || null, restaurantId]
+        [wId, 'order', title, message || null, restaurantId]
       );
+      sendPushToUser(wId, title, message || '', { type: 'order_ready' }).catch(() => {});
     }
-    sendPushToRole(restaurantId, 'waiter', title, message || '', { type: 'order_ready' }).catch(() => {});
   } catch (_) { /* non-critical */ }
 }
 

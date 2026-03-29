@@ -837,7 +837,7 @@ async function updateKitchenItemStatus(req, res) {
         const [orderInfo] = await conn.execute('SELECT order_number, table_id FROM orders WHERE id = ?', [orderId]);
         const orderNum = orderInfo[0]?.order_number || orderId;
         const tableRef = orderInfo[0]?.table_id ? ` is ready for serving` : ' is ready';
-        notifyWaiters(req.user.restaurantId, `Order #${orderNum} Ready`, `Order #${orderNum}${tableRef}`).catch(() => {});
+        notifyWaiters(req.user.restaurantId, `Order #${orderNum} Ready`, `Order #${orderNum}${tableRef}`, orderInfo[0]?.table_id).catch(() => {});
         notifyRestaurantOwner(req.user.restaurantId, 'order', `Order #${orderNum} Ready`, `All items in order #${orderNum} are ready.`).catch(() => {});
       }
     }
